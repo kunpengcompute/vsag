@@ -3622,7 +3622,51 @@ TEST_CASE("HGraph RaBitQ Base with SQ8/SQ8Uniform Precise and Batch", "[ft][hgra
     TestIndex::TestConcurrentKnnSearch(index, dataset, search_param, 0.3, true);
     TestIndex::TestRangeSearch(index, dataset, search_param, 0.3, 10, true);
     TestIndex::TestFilterSearch(index, dataset, search_param, 0.3, true, true);
-    // 序列化往返校验：覆盖 Load 路径（SVE 平台含 maybe_permute_after_load 重排）
+    // Serialization round-trip check: covers the Load path (on SVE platforms
+    // this includes the maybe_permute_after_load permutation)
     auto index2 = TestIndex::TestFactory(HGraphTestIndex::name, build_param, true);
     TestIndex::TestSerializeFile(index, index2, dataset, search_param, true);
+}
+
+TEST_CASE("HGraph Load with Reader-Backed Precise Codes", "[ft][hgraph][serialize]") {
+    using namespace fixtures;
+    // Regression test: the post-load permutation (maybe_permute_after_load, SVE
+    // only) requires every participating data cell to be rewritable in place.
+    // When the precise data uses the read-only reader_io, the permutation used
+    // to read the uninitialized ReaderIO and throw, failing the load. Even with
+    // early initialization, ReaderIO::WriteImpl persists no data, which would
+    // leave the precise codes inconsistent with the labels and graph structure.
+    // After the fix, a single read-only cell skips the whole permutation, so
+    // loading succeeds and search results match the pre-serialization index.
+    // (On non-SVE platforms the permutation never runs; this test also covers
+    // the normal load/search path for reader_io-backed precise codes.)
+    constexpr const char* param_template = R"(
+    {{
+        "dtype": "float32",
+        "metric_type": "l2",
+        "dim": 960,
+        "index_param": {{
+            "use_reorder": true,
+            "base_quantization_type": "rabitq",
+            "rabitq_enable_batch": true,
+            "rabitq_bits_per_dim_query": 32,
+            "rabitq_bits_per_dim_base": 1,
+            "precise_quantization_type": "sq8",
+            "precise_io_type": "{}",
+            "max_degree": 128,
+            "ef_construction": 1000
+        }}
+    }})";
+    auto build_param = fmt::format(param_template, "block_memory_io");
+    auto index = TestIndex::TestFactory(HGraphTestIndex::name, build_param, true);
+    auto dataset = HGraphTestIndex::pool.GetDatasetAndCreate(960, 600, "l2");
+    TestIndex::TestBuildIndex(index, dataset, true);
+    auto search_param = R"({"hgraph": {"ef_search": 424}})";
+
+    // On the loading side, only the precise IO switches to the read-only
+    // reader_io; base data and graph stay in memory
+    auto load_param = fmt::format(param_template, "reader_io");
+    auto index2 = TestIndex::TestFactory(HGraphTestIndex::name, load_param, true);
+    TestIndex::TestSerializeReaderSet(
+        index, index2, dataset, search_param, HGraphTestIndex::name, true);
 }
