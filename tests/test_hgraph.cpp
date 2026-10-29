@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -135,6 +150,7 @@ const std::vector<std::pair<std::string, float>> HGraphTestIndex::all_test_cases
     {"rabitq,fp32,block_memory_io,32,2", 0.3},
     {"rabitq,fp32,block_memory_io,32,4", 0.3},
     {"rabitq,fp32,block_memory_io,32,8", 0.3},
+    {"rabitq,sq8_uniform,block_memory_io,32,1", 0.3},
     {"pq,fp32", 0.95},
     {"sq4_uniform,fp32", 0.95},
     {"sq8_uniform,fp32", 0.98},
@@ -3574,4 +3590,39 @@ TEST_CASE("HGraph Concurrent Tune(disable_future_tuning=false) and CalDistanceBy
     }
 
     REQUIRE(cal_count.load() > 0);
+}
+
+TEST_CASE("HGraph RaBitQ Base with SQ8/SQ8Uniform Precise and Batch", "[ft][hgraph][rabitq]") {
+    using namespace fixtures;
+    auto precise_type = GENERATE("sq8_uniform", "sq8");
+    auto enable_batch = GENERATE(true, false);
+    auto build_param = fmt::format(R"(
+    {{
+        "dtype": "float32",
+        "metric_type": "l2",
+        "dim": 960,
+        "index_param": {{
+            "use_reorder": true,
+            "base_quantization_type": "rabitq",
+            "rabitq_enable_batch": {},
+            "rabitq_bits_per_dim_query": 32,
+            "rabitq_bits_per_dim_base": 1,
+            "precise_quantization_type": "{}",
+            "max_degree": 128,
+            "ef_construction": 1000
+        }}
+    }})",
+                                   enable_batch,
+                                   precise_type);
+    auto index = TestIndex::TestFactory(HGraphTestIndex::name, build_param, true);
+    auto dataset = HGraphTestIndex::pool.GetDatasetAndCreate(960, 600, "l2");
+    TestIndex::TestBuildIndex(index, dataset, true);
+    auto search_param = R"({"hgraph": {"ef_search": 424}})";
+    TestIndex::TestKnnSearch(index, dataset, search_param, 0.3, true);
+    TestIndex::TestConcurrentKnnSearch(index, dataset, search_param, 0.3, true);
+    TestIndex::TestRangeSearch(index, dataset, search_param, 0.3, 10, true);
+    TestIndex::TestFilterSearch(index, dataset, search_param, 0.3, true, true);
+    // 序列化往返校验：覆盖 Load 路径（SVE 平台含 maybe_permute_after_load 重排）
+    auto index2 = TestIndex::TestFactory(HGraphTestIndex::name, build_param, true);
+    TestIndex::TestSerializeFile(index, index2, dataset, search_param, true);
 }
