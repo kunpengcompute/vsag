@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,8 +34,86 @@
 
 namespace vsag {
 
-VSAG_DEFINE_SIMD_DISPATCH(RaBitQFloatBinaryIP, RaBitQFloatBinaryType);
-VSAG_DEFINE_SIMD_DISPATCH(RaBitQFloatBinaryIPBatch4, RaBitQFloatBinaryBatch4Type);
+static RaBitQFloatBinaryType
+GetRaBitQFloatBinaryIP() {
+    if (SimdStatus::SupportAVX512()) {
+#if defined(ENABLE_AVX512)
+        return avx512::RaBitQFloatBinaryIP;
+#endif
+    }
+    if (SimdStatus::SupportAVX2()) {
+#if defined(ENABLE_AVX2)
+        return avx2::RaBitQFloatBinaryIP;
+#endif
+    }
+    if (SimdStatus::SupportAVX()) {
+#if defined(ENABLE_AVX)
+        return avx::RaBitQFloatBinaryIP;
+#endif
+    }
+    if (SimdStatus::SupportSSE()) {
+#if defined(ENABLE_SSE)
+        return sse::RaBitQFloatBinaryIP;
+#endif
+    }
+    if (SimdStatus::SupportSVE()) {
+#if defined(ENABLE_SVE)
+        return sve::RaBitQFloatBinaryIP;
+#endif
+    }
+    if (SimdStatus::SupportNEON()) {
+#if defined(ENABLE_NEON)
+        return neon::RaBitQFloatBinaryIP;
+#endif
+    }
+    return generic::RaBitQFloatBinaryIP;
+}
+RaBitQFloatBinaryType RaBitQFloatBinaryIP = GetRaBitQFloatBinaryIP();
+
+static RaBitQFloatBinaryBatch4Type
+GetRaBitQFloatBinaryIPBatch4() {
+    if (SimdStatus::SupportAVX512()) {
+#if defined(ENABLE_AVX512)
+        return avx512::RaBitQFloatBinaryIPBatch4;
+#endif
+    }
+    if (SimdStatus::SupportAVX2()) {
+#if defined(ENABLE_AVX2)
+        return avx2::RaBitQFloatBinaryIPBatch4;
+#endif
+    }
+    if (SimdStatus::SupportAVX()) {
+#if defined(ENABLE_AVX)
+        return avx::RaBitQFloatBinaryIPBatch4;
+#endif
+    }
+    if (SimdStatus::SupportSSE()) {
+#if defined(ENABLE_SSE)
+        return sse::RaBitQFloatBinaryIPBatch4;
+#endif
+    }
+    if (SimdStatus::SupportSVE()) {
+#if defined(ENABLE_SVE)
+        return sve::RaBitQFloatBinaryIPBatch4;
+#endif
+    }
+    if (SimdStatus::SupportNEON()) {
+#if defined(ENABLE_NEON)
+        return neon::RaBitQFloatBinaryIPBatch4;
+#endif
+    }
+    return generic::RaBitQFloatBinaryIPBatch4;
+}
+RaBitQFloatBinaryBatch4Type RaBitQFloatBinaryIPBatch4 = GetRaBitQFloatBinaryIPBatch4();
+
+bool RaBitQFloatBinaryIPUsesLookup =
+#if defined(ENABLE_SVE)
+    RaBitQFloatBinaryIP == sve::RaBitQFloatBinaryIP and
+    RaBitQFloatBinaryIPBatch4 == sve::RaBitQFloatBinaryIPBatch4;
+#else
+    false;
+#endif
+
 VSAG_DEFINE_SIMD_DISPATCH(RaBitQFloatThreeBitIPBatch4, RaBitQFloatThreeBitBatch4Type);
 VSAG_DEFINE_SIMD_DISPATCH(RaBitQFloatSplitCodeIP, RaBitQFloatSplitCodeType);
 VSAG_DEFINE_SIMD_DISPATCH(RaBitQFloatSupplementCodeIP, RaBitQFloatSupplementCodeType);
@@ -188,5 +282,37 @@ GetFlipSign() {
     return generic::FlipSign;
 }
 FlipSignType FlipSign = GetFlipSign();
+
+// The two 4-bit lookup-table kernels live in sve.cpp, whose whole
+// translation unit is compiled with -march=armv8-a+sve2-bitperm
+// (see src/simd/CMakeLists.txt): they execute svbext/svsli-style
+// SVE2-bitperm instructions that fault with SIGILL on SVE1-only CPUs.
+// Hence the dispatch must require SimdStatus::SupportSVE2Bitperm(), not
+// plain SupportSVE(). Callers on SVE1-only machines transparently fall
+// back to the generic:: implementations, which produce the exact same
+// table layout and results.
+static RaBitQFloatBuild4BitLookupTableType
+GetRaBitQFloatBuild4BitLookupTable() {
+    if (SimdStatus::SupportSVE2Bitperm()) {
+#if defined(ENABLE_SVE)
+        return sve::RaBitQFloatBuild4BitLookupTable;
+#endif
+    }
+    return generic::RaBitQFloatBuild4BitLookupTable;
+}
+RaBitQFloatBuild4BitLookupTableType RaBitQFloatBuild4BitLookupTable =
+    GetRaBitQFloatBuild4BitLookupTable();
+
+static RaBitQFloatBatchBinaryIPBy4BitLookupType
+GetRaBitQFloatBatchBinaryIPBy4BitLookup() {
+    if (SimdStatus::SupportSVE2Bitperm()) {
+#if defined(ENABLE_SVE)
+        return sve::RaBitQFloatBatchBinaryIPBy4BitLookup;
+#endif
+    }
+    return generic::RaBitQFloatBatchBinaryIPBy4BitLookup;
+}
+RaBitQFloatBatchBinaryIPBy4BitLookupType RaBitQFloatBatchBinaryIPBy4BitLookup =
+    GetRaBitQFloatBatchBinaryIPBy4BitLookup();
 
 }  // namespace vsag

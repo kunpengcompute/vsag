@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -154,6 +169,32 @@ public:
         ret &= cpuinfo_has_arm_sve();
         return ret;
     }
+
+    static inline bool
+    RuntimeSVE() {
+#if defined(__aarch64__)
+        Init();
+        return cpuinfo_has_arm_sve();
+#else
+        return false;
+#endif
+    }
+
+    // ARM SVE2-bitperm (BEXT/BDEP/BGRP bit-permutation instructions, an
+    // Armv8.5-A optional extension layered on top of SVE2).  Returns true
+    // only when:
+    //   * the binary was built with ENABLE_SVE (CMake flag),
+    //   * cpuinfo reports plain SVE on the running CPU,
+    //   * getauxval(AT_HWCAP2) reports both HWCAP2_SVE2 and
+    //     HWCAP2_SVEBITPERM (Linux/aarch64 only).
+    // cpuinfo has no dedicated query for this extension yet, hence the
+    // direct auxv probe; same lazy-cached magic-static semantics as
+    // `SupportAMX()`.  Translation units compiled with
+    // `-march=armv8-a+sve2-bitperm` must be dispatched only when this
+    // returns true, otherwise svbext & co. fault with SIGILL on
+    // SVE1-only hardware.
+    static bool
+    SupportSVE2Bitperm();
 
     [[nodiscard]] std::string
     sse() const {

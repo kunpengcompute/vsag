@@ -32,6 +32,23 @@
 #endif
 #endif  // ENABLE_AMX && Linux x86_64
 
+#if defined(ENABLE_SVE) && defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+
+// Kernel UAPI values for the auxv hardware-capability bits. Defined locally
+// when the toolchain headers are too old to carry them; the values are
+// stable kernel ABI (same rationale as the AMX prctl constants above).
+#ifndef AT_HWCAP2
+#define AT_HWCAP2 26
+#endif
+#ifndef HWCAP2_SVE2
+#define HWCAP2_SVE2 (1UL << 1)
+#endif
+#ifndef HWCAP2_SVEBITPERM
+#define HWCAP2_SVEBITPERM (1UL << 4)
+#endif
+#endif  // ENABLE_SVE && Linux aarch64
+
 namespace vsag {
 bool SimdStatus::is_inited = false;
 
@@ -79,6 +96,30 @@ SimdStatus::SupportAMXBF16() {
         unsigned int eax = 7, ebx = 0, ecx = 0, edx = 0;
         __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
         return ((edx >> 22) & 1u) != 0;
+    }();
+    return supported;
+#else
+    return false;
+#endif
+}
+
+bool
+SimdStatus::SupportSVE2Bitperm() {
+#if defined(ENABLE_SVE) && defined(__linux__) && defined(__aarch64__)
+    // Thread-safe magic static: the probe runs exactly once per process
+    // (same pattern as SupportAMX above).
+    static const bool supported = []() -> bool {
+        Init();
+        // Non-SVE cores never reach the auxv probe.
+        if (!cpuinfo_has_arm_sve()) {
+            return false;
+        }
+        // cpuinfo has no dedicated SVE2-bitperm query, so read the
+        // kernel-provided capabilities directly. The 4-bit lookup-table
+        // kernels mix SVE2 TBL with svbext, hence both bits are required.
+        const unsigned long hwcap2 = getauxval(AT_HWCAP2);
+        constexpr unsigned long required = HWCAP2_SVE2 | HWCAP2_SVEBITPERM;
+        return (hwcap2 & required) == required;
     }();
     return supported;
 #else
