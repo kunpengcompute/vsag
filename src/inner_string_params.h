@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -107,6 +123,7 @@ const char* const RABITQ_QUANTIZATION_BITS_PER_DIM_QUERY_KEY = "rabitq_bits_per_
 const char* const RABITQ_QUANTIZATION_BITS_PER_DIM_BASE_KEY = "rabitq_bits_per_dim_base";
 const char* const RABITQ_QUANTIZATION_BITS_PER_DIM_FILTER_KEY = "rabitq_bits_per_dim_filter";
 const char* const RABITQ_QUANTIZATION_ERROR_RATE_KEY = "rabitq_error_rate";
+const char* const RABITQ_ENABLE_BATCH_KEY = "rabitq_enable_batch";
 const char* const SQ4_UNIFORM_QUANTIZATION_TRUNC_RATE_KEY = "sq4_uniform_trunc_rate";
 const char* const PRODUCT_QUANTIZATION_DIM_KEY = "pq_dim";
 const char* const PRODUCT_QUANTIZATION_BITS_KEY = "pq_bits";
@@ -284,6 +301,7 @@ const std::unordered_map<std::string, std::string> DEFAULT_MAP = {
     {"RABITQ_QUANTIZATION_BITS_PER_DIM_BASE_KEY", RABITQ_QUANTIZATION_BITS_PER_DIM_BASE_KEY},
     {"RABITQ_QUANTIZATION_BITS_PER_DIM_FILTER_KEY", RABITQ_QUANTIZATION_BITS_PER_DIM_FILTER_KEY},
     {"RABITQ_QUANTIZATION_ERROR_RATE_KEY", RABITQ_QUANTIZATION_ERROR_RATE_KEY},
+    {"RABITQ_ENABLE_BATCH_KEY", RABITQ_ENABLE_BATCH_KEY},
     {"USE_FHT_KEY", USE_FHT_KEY},
     {"TQ_CHAIN_KEY", TQ_CHAIN_KEY},
     {"NO_BUILD_LEVELS", NO_BUILD_LEVELS},

@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -55,7 +71,8 @@ public:
         std::string rabitq_version = RaBitQuantizerParameter::DEFAULT_RABITQ_VERSION,
         float rabitq_error_rate = RaBitQuantizerParameter::DEFAULT_RABITQ_ERROR_RATE,
         uint64_t num_bits_per_dim_filter =
-            RaBitQuantizerParameter::DEFAULT_RABITQ_BITS_PER_DIM_FILTER);
+            RaBitQuantizerParameter::DEFAULT_RABITQ_BITS_PER_DIM_FILTER,
+        bool rabitq_enable_batch = false);
 
     explicit RaBitQuantizer(const RaBitQuantizerParamPtr& param,
                             const IndexCommonParam& common_param);
@@ -90,10 +107,39 @@ public:
     ComputeDistImpl(Computer<RaBitQuantizer>& computer, const uint8_t* codes, float* dists) const;
 
     void
+    ComputeDistsBatch4Impl(Computer<RaBitQuantizer>& computer,
+                           const uint8_t* codes1,
+                           const uint8_t* codes2,
+                           const uint8_t* codes3,
+                           const uint8_t* codes4,
+                           float& dists1,
+                           float& dists2,
+                           float& dists3,
+                           float& dists4) const;
+
+    void
     ScanBatchDistImpl(Computer<RaBitQuantizer<metric>>& computer,
                       uint64_t count,
                       const uint8_t* codes,
                       float* dists) const;
+
+    void
+    ComputeDistsBatchTransposedImpl(Computer<RaBitQuantizer>& computer,
+                                    const uint8_t* codes,
+                                    const uint32_t* idx,
+                                    uint64_t id_count,
+                                    float* dists) const override;
+
+    [[nodiscard]] int
+    GetBatchMode() const override;
+
+    [[nodiscard]] uint64_t
+    GetPackedCodeSize() const override;
+
+    [[nodiscard]] uint64_t
+    Get4BitLutOffset() const {
+        return query_offset_4bit_lut_;
+    }
 
     void
     ReleaseComputerImpl(Computer<RaBitQuantizer<metric>>& computer) const;
@@ -298,6 +344,14 @@ private:
     [[nodiscard]] norm_type
     ComputeFilterCodeNorm(const uint8_t* filter_code, uint32_t filter_bits) const;
 
+    [[nodiscard]] bool
+    UseBinaryQueryLookup() const;
+
+    [[nodiscard]] float
+    RecoverQueryBaseDistance(const uint8_t* query_codes,
+                             const uint8_t* base_codes,
+                             float ip_bq_estimate) const;
+
     // bit related
     uint64_t num_bits_per_dim_query_{32};
     uint32_t num_bits_per_dim_base_{1};
@@ -329,6 +383,11 @@ private:
     uint64_t query_offset_norm_{0};
     uint64_t query_offset_mrq_norm_{0};
     uint64_t query_offset_raw_norm_{0};
+    uint64_t query_offset_binary_lut_{0};
+    uint64_t query_binary_lut_size_{0};
+    uint64_t query_offset_4bit_lut_{0};
+    uint64_t query_4bit_lut_size_{0};
+    bool rabitq_enable_batch_{false};
     uint64_t query_offset_filter_lut_{0};
 
     /***

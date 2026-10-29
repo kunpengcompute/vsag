@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -18,18 +34,30 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <limits>
 #include <queue>
 #include <utility>
 
 #include "impl/transform/transformer_headers.h"
+#include "query_context.h"
 #include "simd/fp32_simd.h"
 #include "simd/normalize.h"
 #include "simd/rabitq_simd.h"
+#include "simd/simd_status.h"
 #include "typing.h"
 #include "utils/util_functions.h"
 
 namespace vsag {
+
+namespace {
+
+void
+BuildBinaryQueryLookupTable(const float* query, uint64_t dim, float inv_sqrt_d, float* lookup) {
+    sve::BuildBinaryQueryLookupTable(query, dim, inv_sqrt_d, lookup);
+}
+
+}  // namespace
 
 template <MetricType metric>
 RaBitQuantizer<metric>::RaBitQuantizer(int dim,
@@ -41,7 +69,8 @@ RaBitQuantizer<metric>::RaBitQuantizer(int dim,
                                        Allocator* allocator,
                                        std::string rabitq_version,
                                        float rabitq_error_rate,
-                                       uint64_t num_bits_per_dim_filter)
+                                       uint64_t num_bits_per_dim_filter,
+                                       bool rabitq_enable_batch)
     : Quantizer<RaBitQuantizer<metric>>(dim, allocator) {
     // dim
     use_mrq_ = use_mrq;
@@ -86,6 +115,7 @@ RaBitQuantizer<metric>::RaBitQuantizer(int dim,
     inv_sqrt_d_ = 1.0F / sqrt(this->dim_);
     rabitq_version_ = std::move(rabitq_version);
     rabitq_error_rate_ = rabitq_error_rate;
+    rabitq_enable_batch_ = rabitq_enable_batch;
 
     // base code layout
     uint64_t align_size = std::max(std::max(sizeof(error_type), sizeof(norm_type)), sizeof(float));
@@ -168,6 +198,18 @@ RaBitQuantizer<metric>::RaBitQuantizer(int dim,
         this->query_code_size_ += AlignCodeField(FilterQueryLookupTableSize());
     }
 
+    if (UseBinaryQueryLookup()) {
+        query_offset_binary_lut_ = this->query_code_size_;
+        query_binary_lut_size_ = PlaneBytes() * 256 * sizeof(float);
+        this->query_code_size_ += AlignCodeField(query_binary_lut_size_);
+    }
+
+    if (rabitq_enable_batch_) {
+        query_offset_4bit_lut_ = this->query_code_size_;
+        query_4bit_lut_size_ = ((this->dim_ + 3) / 4) * 16 * sizeof(float16_t);
+        this->query_code_size_ += AlignCodeField(query_4bit_lut_size_);
+    }
+
     if (SupportSplitCodeStorage()) {
         offset_low_bound_error_ = this->code_size_;
         this->code_size_ += ((sizeof(error_type) + align_size - 1) / align_size) * align_size;
@@ -189,7 +231,8 @@ RaBitQuantizer<metric>::RaBitQuantizer(const RaBitQuantizerParamPtr& param,
                              common_param.allocator_.get(),
                              param->rabitq_version_,
                              param->rabitq_error_rate_,
-                             param->num_bits_per_dim_filter_){};
+                             param->num_bits_per_dim_filter_,
+                             param->rabitq_enable_batch_){};
 
 template <MetricType metric>
 RaBitQuantizer<metric>::RaBitQuantizer(const QuantizerParamPtr& param,
@@ -800,6 +843,13 @@ RaBitQuantizer<metric>::AlignCodeField(uint64_t size) const {
 
 template <MetricType metric>
 bool
+RaBitQuantizer<metric>::UseBinaryQueryLookup() const {
+    return num_bits_per_dim_query_ == 32 and num_bits_per_dim_base_ == 1 and
+           RaBitQFloatBinaryIPUsesLookup;
+}
+
+template <MetricType metric>
+bool
 RaBitQuantizer<metric>::HasFilterQueryLookupTable() const {
     return SupportSplitCodeStorage() && (FilterBits() == 2 or FilterBits() == 3) &&
            num_bits_per_dim_query_ == 32;
@@ -1038,6 +1088,13 @@ RaBitQuantizer<metric>::ComputeDistWithOneBitLowerBound(Computer<RaBitQuantizer>
     }
 
     const auto* query = computer.buf_;
+    const bool use_binary_lut = UseBinaryQueryLookup();
+    const auto* query_data = reinterpret_cast<const float*>(query);
+    const auto* query_binary = use_binary_lut
+                                   ? reinterpret_cast<const float*>(query + query_offset_binary_lut_)
+                                   : query_data;
+    const float binary_inv_sqrt_d = use_binary_lut ? std::numeric_limits<float>::quiet_NaN()
+                                                    : inv_sqrt_d_;
     const error_type one_bit_error =
         std::fabs(*((error_type*)(one_bit_code + OneBitRecordOneBitErrorOffset())));
     if (one_bit_error <= 1e-5F) {
@@ -1049,7 +1106,7 @@ RaBitQuantizer<metric>::ComputeDistWithOneBitLowerBound(Computer<RaBitQuantizer>
     norm_type base_norm_code = 0.0F;
     if (FilterBits() == 1) {
         filter_ip_estimate = RaBitQFloatBinaryIP(
-            reinterpret_cast<const float*>(query), one_bit_code, this->dim_, inv_sqrt_d_);
+            query_binary, one_bit_code, this->dim_, binary_inv_sqrt_d);
     } else {
         sum_type query_raw_sum = *((sum_type*)(query + query_offset_sum_));
         memcpy(
@@ -1195,6 +1252,12 @@ RaBitQuantizer<metric>::ComputeDistsWithOneBitLowerBoundBatch4(
 
     const auto* query = computer.buf_;
     const auto* query_data = reinterpret_cast<const float*>(query);
+    const bool use_binary_lut = UseBinaryQueryLookup();
+    const auto* query_binary = use_binary_lut
+                                   ? reinterpret_cast<const float*>(query + query_offset_binary_lut_)
+                                   : query_data;
+    const float binary_inv_sqrt_d = use_binary_lut ? std::numeric_limits<float>::quiet_NaN()
+                                                    : inv_sqrt_d_;
     const norm_type query_norm = *((norm_type*)(query + query_offset_norm_));
     const norm_type query_mrq_norm_sqr = pca_dim_ != this->original_dim_ and use_mrq_
                                              ? *(norm_type*)(query + query_offset_mrq_norm_)
@@ -1211,14 +1274,14 @@ RaBitQuantizer<metric>::ComputeDistsWithOneBitLowerBoundBatch4(
     float filter_ip_values[4] = {0.0F, 0.0F, 0.0F, 0.0F};
     bool filter_ip_values_are_centered = false;
     if (FilterBits() == 1) {
-        RaBitQFloatBinaryIPBatch4(query_data,
-                                  one_bit_code1,
-                                  one_bit_code2,
-                                  one_bit_code3,
-                                  one_bit_code4,
-                                  this->dim_,
-                                  inv_sqrt_d_,
-                                  filter_ip_values);
+        RaBitQFloatBinaryIPBatch4(query_binary,
+                                       one_bit_code1,
+                                       one_bit_code2,
+                                       one_bit_code3,
+                                       one_bit_code4,
+                                       this->dim_,
+                                       binary_inv_sqrt_d,
+                                       filter_ip_values);
     } else if (FilterBits() == 2) {
         RaBitQFloatTwoBitCenteredIPBatch4(query_data,
                                           one_bit_code1,
@@ -1329,6 +1392,12 @@ RaBitQuantizer<metric>::ComputeDistWithSplitCode(Computer<RaBitQuantizer>& compu
     }
 
     const auto* query = computer.buf_;
+    const bool use_binary_lut = UseBinaryQueryLookup();
+    const auto* query_binary = use_binary_lut
+                                   ? reinterpret_cast<const float*>(query + query_offset_binary_lut_)
+                                   : reinterpret_cast<const float*>(query);
+    const float binary_inv_sqrt_d = use_binary_lut ? std::numeric_limits<float>::quiet_NaN()
+                                                    : inv_sqrt_d_;
     const auto* split_meta = supplement_code + SupplementMetaOffset();
     const auto code_meta_offset = CodeMetaOffset();
     auto meta_field = [split_meta, code_meta_offset](uint64_t offset) {
@@ -1338,7 +1407,7 @@ RaBitQuantizer<metric>::ComputeDistWithSplitCode(Computer<RaBitQuantizer>& compu
     float ip_bq_estimate = 0.0F;
     if (num_bits_per_dim_base_ == 1) {
         ip_bq_estimate = RaBitQFloatBinaryIP(
-            reinterpret_cast<const float*>(query), one_bit_code, this->dim_, inv_sqrt_d_);
+            query_binary, one_bit_code, this->dim_, binary_inv_sqrt_d);
     } else if (FilterBits() == 1) {
         sum_type query_raw_sum = *((sum_type*)(query + query_offset_sum_));
         float ip_yu_q = RaBitQFloatSplitCodeIP(reinterpret_cast<const float*>(query),
@@ -1442,6 +1511,12 @@ RaBitQuantizer<metric>::ComputeDistWithSplitCodeAndFilterDist(Computer<RaBitQuan
     }
 
     const auto* query = computer.buf_;
+    const bool use_binary_lut = UseBinaryQueryLookup();
+    const auto* query_binary = use_binary_lut
+                                   ? reinterpret_cast<const float*>(query + query_offset_binary_lut_)
+                                   : reinterpret_cast<const float*>(query);
+    const float binary_inv_sqrt_d = use_binary_lut ? std::numeric_limits<float>::quiet_NaN()
+                                                    : inv_sqrt_d_;
     const auto* split_meta = supplement_code + SupplementMetaOffset();
     const auto code_meta_offset = CodeMetaOffset();
     auto meta_field = [split_meta, code_meta_offset](uint64_t offset) {
@@ -1514,42 +1589,9 @@ RaBitQuantizer<metric>::ComputeDistWithSplitCodeAndFilterDist(Computer<RaBitQuan
 
 template <MetricType metric>
 float
-RaBitQuantizer<metric>::ComputeQueryBaseImpl(const uint8_t* query_codes,
-                                             const uint8_t* base_codes) const {
-    // codes1 -> query (fp32, sq8, sq4...) + norm
-    // codes2 -> base  (binary) + norm + error
-    float ip_bq_estimate = 0;
-    if (num_bits_per_dim_query_ == 4 and num_bits_per_dim_base_ == 1) {
-        //
-        std::vector<uint8_t> tmp(aligned_dim_ / 8, 0);
-        memcpy(tmp.data(), base_codes, offset_norm_);
-
-        ip_bq_estimate = RaBitQSQ4UBinaryIP(query_codes, tmp.data(), aligned_dim_);
-
-        sum_type base_sum = *reinterpret_cast<const sum_type*>(base_codes + offset_sum_);
-        sum_type query_sum = *((sum_type*)(query_codes + query_offset_sum_));
-        float lower_bound = *((float*)(query_codes + query_offset_lb_));
-        float delta = *((float*)(query_codes + query_offset_delta_));
-
-        ip_bq_estimate = recover_dist_between_sq4u_and_fp32(
-            ip_bq_estimate, base_sum, query_sum, lower_bound, delta, this->inv_sqrt_d_, this->dim_);
-    } else if (num_bits_per_dim_query_ == 32 and num_bits_per_dim_base_ == 1) {
-        ip_bq_estimate = RaBitQFloatBinaryIP(
-            reinterpret_cast<const float*>(query_codes), base_codes, this->dim_, inv_sqrt_d_);
-    } else if (num_bits_per_dim_query_ == 32 and num_bits_per_dim_base_ != 1) {
-        sum_type query_raw_sum = *((sum_type*)(query_codes + query_offset_sum_));
-
-        float ip_yu_q = RaBitQFloatSQIPByPlanes(reinterpret_cast<const float*>(query_codes),
-                                                base_codes + offset_code_);
-
-        ip_bq_estimate = ip_obar_q(ip_yu_q,
-                                   query_raw_sum,
-                                   *(norm_type*)(base_codes + offset_norm_code_),
-                                   num_bits_per_dim_base_);
-    } else {
-        // num_bits_per_dim_query_ == 4 and num_bits_per_dim_base_ != 1: not support for now
-    }
-
+RaBitQuantizer<metric>::RecoverQueryBaseDistance(const uint8_t* query_codes,
+                                                 const uint8_t* base_codes,
+                                                 float ip_bq_estimate) const {
     norm_type query_norm = *((norm_type*)(query_codes + query_offset_norm_));
     norm_type base_norm = *((norm_type*)(base_codes + offset_norm_));
 
@@ -1597,6 +1639,138 @@ RaBitQuantizer<metric>::ComputeQueryBaseImpl(const uint8_t* query_codes,
     }
 
     return result;
+}
+
+template <MetricType metric>
+float
+RaBitQuantizer<metric>::ComputeQueryBaseImpl(const uint8_t* query_codes,
+                                             const uint8_t* base_codes) const {
+    // codes1 -> query (fp32, sq8, sq4...) + norm
+    // codes2 -> base  (binary) + norm + error
+    float ip_bq_estimate = 0;
+    if (num_bits_per_dim_query_ == 4 and num_bits_per_dim_base_ == 1) {
+        //
+        std::vector<uint8_t> tmp(aligned_dim_ / 8, 0);
+        memcpy(tmp.data(), base_codes, offset_norm_);
+
+        ip_bq_estimate = RaBitQSQ4UBinaryIP(query_codes, tmp.data(), aligned_dim_);
+
+        sum_type base_sum = *reinterpret_cast<const sum_type*>(base_codes + offset_sum_);
+        sum_type query_sum = *((sum_type*)(query_codes + query_offset_sum_));
+        float lower_bound = *((float*)(query_codes + query_offset_lb_));
+        float delta = *((float*)(query_codes + query_offset_delta_));
+
+        ip_bq_estimate = recover_dist_between_sq4u_and_fp32(
+            ip_bq_estimate, base_sum, query_sum, lower_bound, delta, this->inv_sqrt_d_, this->dim_);
+    } else if (num_bits_per_dim_query_ == 32 and num_bits_per_dim_base_ == 1) {
+        const bool use_binary_lut = UseBinaryQueryLookup();
+        const auto* query_binary = use_binary_lut
+                                       ? reinterpret_cast<const float*>(query_codes +
+                                                                        query_offset_binary_lut_)
+                                       : reinterpret_cast<const float*>(query_codes);
+        const float binary_inv_sqrt_d = use_binary_lut ? std::numeric_limits<float>::quiet_NaN()
+                                                        : inv_sqrt_d_;
+        ip_bq_estimate = RaBitQFloatBinaryIP(
+            query_binary, base_codes, this->dim_, binary_inv_sqrt_d);
+    } else if (num_bits_per_dim_query_ == 32 and num_bits_per_dim_base_ != 1) {
+        sum_type query_raw_sum = *((sum_type*)(query_codes + query_offset_sum_));
+
+        float ip_yu_q = RaBitQFloatSQIPByPlanes(reinterpret_cast<const float*>(query_codes),
+                                                base_codes + offset_code_);
+
+        ip_bq_estimate = ip_obar_q(ip_yu_q,
+                                   query_raw_sum,
+                                   *(norm_type*)(base_codes + offset_norm_code_),
+                                   num_bits_per_dim_base_);
+    } else {
+        // num_bits_per_dim_query_ == 4 and num_bits_per_dim_base_ != 1: not support for now
+    }
+
+    return RecoverQueryBaseDistance(query_codes, base_codes, ip_bq_estimate);
+}
+
+template <MetricType metric>
+void
+RaBitQuantizer<metric>::ComputeDistsBatch4Impl(Computer<RaBitQuantizer>& computer,
+                                               const uint8_t* codes1,
+                                               const uint8_t* codes2,
+                                               const uint8_t* codes3,
+                                               const uint8_t* codes4,
+                                               float& dists1,
+                                               float& dists2,
+                                               float& dists3,
+                                               float& dists4) const {
+    if (num_bits_per_dim_query_ == 32 and num_bits_per_dim_base_ == 1) {
+        const auto* query = computer.buf_;
+        const bool use_binary_lut = UseBinaryQueryLookup();
+        const auto* query_binary = use_binary_lut
+                                       ? reinterpret_cast<const float*>(query + query_offset_binary_lut_)
+                                       : reinterpret_cast<const float*>(query);
+        const float binary_inv_sqrt_d = use_binary_lut ? std::numeric_limits<float>::quiet_NaN()
+                                                        : inv_sqrt_d_;
+
+        float ips[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        RaBitQFloatBinaryIPBatch4(query_binary,
+                                       codes1,
+                                       codes2,
+                                       codes3,
+                                       codes4,
+                                       this->dim_,
+                                       binary_inv_sqrt_d,
+                                       ips);
+        dists1 = RecoverQueryBaseDistance(query, codes1, ips[0]);
+        dists2 = RecoverQueryBaseDistance(query, codes2, ips[1]);
+        dists3 = RecoverQueryBaseDistance(query, codes3, ips[2]);
+        dists4 = RecoverQueryBaseDistance(query, codes4, ips[3]);
+        return;
+    }
+
+    dists1 = this->ComputeQueryBaseImpl(computer.buf_, codes1);
+    dists2 = this->ComputeQueryBaseImpl(computer.buf_, codes2);
+    dists3 = this->ComputeQueryBaseImpl(computer.buf_, codes3);
+    dists4 = this->ComputeQueryBaseImpl(computer.buf_, codes4);
+}
+
+template <MetricType metric>
+void
+RaBitQuantizer<metric>::ComputeDistsBatchTransposedImpl(Computer<RaBitQuantizer>& computer,
+                                                        const uint8_t* codes,
+                                                        const uint32_t* idx,
+                                                        uint64_t id_count,
+                                                        float* dists) const {
+    if (num_bits_per_dim_query_ != 32 or num_bits_per_dim_base_ != 1) {
+        // the 4-bit lookup kernel only supports fp32 query with 1-bit base codes;
+        // other configurations fall back to the regular per-code path
+        for (uint64_t i = 0; i < id_count; ++i) {
+            const uint8_t* code = codes + static_cast<uint64_t>(idx[i]) * this->code_size_;
+            this->ComputeDistImpl(computer, code, dists + i);
+        }
+        return;
+    }
+    const auto* lut = reinterpret_cast<const float16_t*>(computer.buf_ + query_offset_4bit_lut_);
+    RaBitQFloatBatchBinaryIPBy4BitLookup(
+        codes, id_count, this->dim_, this->code_size_, lut, dists, idx);
+    for (uint64_t i = 0; i < id_count; ++i) {
+        const uint8_t* code = codes + static_cast<uint64_t>(idx[i]) * this->code_size_;
+        dists[i] = this->RecoverQueryBaseDistance(computer.buf_, code, dists[i]);
+    }
+}
+
+template <MetricType metric>
+int
+RaBitQuantizer<metric>::GetBatchMode() const {
+    // batch kernels only support fp32 query with 1-bit base codes;
+    // other bit configurations must fall back to the regular path
+    return (rabitq_enable_batch_ and num_bits_per_dim_query_ == 32 and
+            num_bits_per_dim_base_ == 1)
+               ? 1
+               : 0;
+}
+
+template <MetricType metric>
+uint64_t
+RaBitQuantizer<metric>::GetPackedCodeSize() const {
+    return (this->dim_ + 7) / 8;
 }
 
 template <MetricType metric>
@@ -1755,8 +1929,8 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
             for (uint64_t d = 0; d < this->dim_; ++d) {
                 query_raw_norm += query[d] * query[d];
             }
+            query_raw_norm = std::sqrt(query_raw_norm);
         }
-        query_raw_norm = std::sqrt(query_raw_norm);
         // 1. pca
         if (pca_dim_ != this->original_dim_) {
             pca_->Transform(query, pca_data.data());
@@ -1792,7 +1966,9 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
                      lower_bound,
                      delta,
                      query_sum);
+
             ReOrderSQ(quantized_data.data(), reinterpret_cast<uint8_t*>(computer.buf_));
+
             // store info
             *(float*)(computer.buf_ + query_offset_lb_) = lower_bound;
             *(float*)(computer.buf_ + query_offset_delta_) = delta;
@@ -1815,6 +1991,17 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
                 normed_data.data(),
                 this->dim_,
                 reinterpret_cast<float*>(computer.buf_ + query_offset_filter_lut_));
+        }
+
+        if (UseBinaryQueryLookup()) {
+            BuildBinaryQueryLookupTable(normed_data.data(), this->dim_, inv_sqrt_d_,
+                                        reinterpret_cast<float*>(computer.buf_ +
+                                                                 query_offset_binary_lut_));
+        }
+
+        if (rabitq_enable_batch_) {
+            auto* lut_4bit = reinterpret_cast<float16_t*>(computer.buf_ + query_offset_4bit_lut_);
+            RaBitQFloatBuild4BitLookupTable(normed_data.data(), this->dim_, inv_sqrt_d_, lut_4bit);
         }
 
         // 5. store norm
