@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -401,6 +402,113 @@ TEST_CASE("LabelTable Move", "[ut][LabelTable]") {
         REQUIRE(label_table.TryGetIdByLabel(100, true).first == false);
         REQUIRE(label_table.IsRemoved(0) == false);
         REQUIRE(label_table.GetTotalCount() == 1);
+    }
+}
+
+TEST_CASE("LabelTable PermuteEntries Preserves Source Ids", "[ut][LabelTable]") {
+    auto allocator = std::make_shared<DefaultAllocator>();
+
+    SECTION("source id moved beyond old table length is kept") {
+        // 3 records, only old id 0 has a source id, so the table length is 1.
+        // perm = [1, 2, 0] moves it to new id 2, beyond the old length.
+        LabelTable label_table(allocator.get());
+        label_table.Insert(0, 100);
+        label_table.Insert(1, 200);
+        label_table.Insert(2, 300);
+        label_table.InsertSourceId(0, "src-0");
+
+        Vector<InnerIdType> perm({1, 2, 0}, allocator.get());
+        Vector<InnerIdType> imap(perm.size(), 0, allocator.get());
+        for (InnerIdType new_id = 0; new_id < perm.size(); ++new_id) {
+            imap[perm[new_id]] = new_id;
+        }
+
+        label_table.PermuteEntries(perm, imap);
+
+        REQUIRE(label_table.GetSourceIdTableRef().size() == 3);
+        REQUIRE(label_table.GetLabelById(2) == 100);
+        REQUIRE(label_table.GetIdByLabel(100) == 2);
+        REQUIRE(label_table.GetSourceId(2) == "src-0");
+        REQUIRE(label_table.GetSourceId(0).empty());
+        REQUIRE(label_table.GetSourceId(1).empty());
+    }
+
+    SECTION("partial source ids survive a full permutation") {
+        // 4 records with source ids on old ids 0 and 1 (table length 2).
+        // perm = [2, 0, 3, 1] keeps "src-0" inside the old length but moves
+        // "src-1" to new id 3, beyond it.
+        LabelTable label_table(allocator.get());
+        for (InnerIdType id = 0; id < 4; ++id) {
+            label_table.Insert(id, static_cast<LabelType>(id + 1) * 100);
+        }
+        label_table.InsertSourceId(0, "src-0");
+        label_table.InsertSourceId(1, "src-1");
+
+        Vector<InnerIdType> perm({2, 0, 3, 1}, allocator.get());
+        Vector<InnerIdType> imap(perm.size(), 0, allocator.get());
+        for (InnerIdType new_id = 0; new_id < perm.size(); ++new_id) {
+            imap[perm[new_id]] = new_id;
+        }
+
+        label_table.PermuteEntries(perm, imap);
+
+        REQUIRE(label_table.GetSourceIdTableRef().size() == 4);
+        REQUIRE(label_table.GetSourceId(1) == "src-0");
+        REQUIRE(label_table.GetSourceId(3) == "src-1");
+        REQUIRE(label_table.GetSourceId(0).empty());
+        REQUIRE(label_table.GetSourceId(2).empty());
+    }
+
+    SECTION("label to source id mapping is stable across permutation") {
+        // Sparse prefix table: source ids on old ids 0, 3 and 5 (length 6);
+        // perm moves old id 3 to new id 6, beyond the old length. Querying
+        // source ids by external label must give the same results before and
+        // after the permutation.
+        LabelTable label_table(allocator.get());
+        constexpr uint64_t count = 8;
+        for (InnerIdType id = 0; id < count; ++id) {
+            label_table.Insert(id, static_cast<LabelType>(id + 1) * 100);
+        }
+        label_table.InsertSourceId(0, "src-0");
+        label_table.InsertSourceId(3, "src-3");
+        label_table.InsertSourceId(5, "src-5");
+
+        std::map<LabelType, std::string> before;
+        for (InnerIdType id = 0; id < count; ++id) {
+            const auto label = label_table.GetLabelById(id);
+            before[label] = label_table.GetSourceId(label_table.GetIdByLabel(label));
+        }
+
+        Vector<InnerIdType> perm({5, 2, 7, 0, 4, 1, 3, 6}, allocator.get());
+        Vector<InnerIdType> imap(perm.size(), 0, allocator.get());
+        for (InnerIdType new_id = 0; new_id < perm.size(); ++new_id) {
+            imap[perm[new_id]] = new_id;
+        }
+        label_table.PermuteEntries(perm, imap);
+
+        std::map<LabelType, std::string> after;
+        for (InnerIdType id = 0; id < count; ++id) {
+            const auto label = label_table.GetLabelById(id);
+            after[label] = label_table.GetSourceId(label_table.GetIdByLabel(label));
+        }
+        REQUIRE(after == before);
+        REQUIRE(after.at(400) == "src-3");
+        REQUIRE(label_table.GetTotalCount() == static_cast<int64_t>(count));
+    }
+
+    SECTION("table without source ids stays empty") {
+        LabelTable label_table(allocator.get());
+        label_table.Insert(0, 100);
+        label_table.Insert(1, 200);
+
+        Vector<InnerIdType> perm({1, 0}, allocator.get());
+        Vector<InnerIdType> imap({1, 0}, allocator.get());
+
+        label_table.PermuteEntries(perm, imap);
+
+        REQUIRE(label_table.GetSourceIdTableRef().empty());
+        REQUIRE(label_table.GetIdByLabel(100) == 1);
+        REQUIRE(label_table.GetIdByLabel(200) == 0);
     }
 }
 
