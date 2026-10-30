@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -20,6 +35,7 @@
 #include "typing.h"
 #include "utils/pointer_define.h"
 #include "utils/prefetch.h"
+#include "vsag_exception.h"
 
 namespace vsag {
 class Allocator;
@@ -41,6 +57,22 @@ public:
     [[nodiscard]] bool
     Get(const InnerIdType& id) {
         return this->list_[id] == this->tag_;
+    }
+
+    [[nodiscard]] bool
+    CheckAndSet(const InnerIdType& id) {
+        if (id >= this->max_size_) {
+            throw VsagException(ErrorType::INTERNAL_ERROR,
+                                "VisitedList::CheckAndSet: id ",
+                                id,
+                                " is out of range, max_size = ",
+                                this->max_size_);
+        }
+        if (this->list_[id] == this->tag_) {
+            return false;
+        }
+        this->list_[id] = this->tag_;
+        return true;
     }
 
     void

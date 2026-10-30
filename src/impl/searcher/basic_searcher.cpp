@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -23,6 +38,7 @@
 #include "datacell/flatten_interface.h"
 #include "impl/filter/iterator_filter.h"
 #include "impl/heap/standard_heap.h"
+#include "impl/query_computer_pool.h"
 #include "impl/reasoning/search_reasoning.h"
 #include "utils/filter_search_skip_strategy.h"
 #include "vsag/allocator.h"
@@ -50,20 +66,36 @@ BasicSearcher::visit(const GraphInterfacePtr& graph,
         graph->GetNeighbors(current_node_pair.second, neighbors);
     }
 
-    for (uint32_t i = 0; i < neighbors.size(); i++) {
-        if (i + prefetch_stride_visit_ < neighbors.size()) {
+    const auto neighbor_count = static_cast<uint32_t>(neighbors.size());
+    if (filter == nullptr) {
+        for (uint32_t i = 0; i < neighbor_count; ++i) {
+            if (i + prefetch_stride_visit_ < neighbor_count) {
+                vl->Prefetch(neighbors[i + prefetch_stride_visit_]);
+            }
+
+            const auto neighbor_id = neighbors[i];
+            if (vl->CheckAndSet(neighbor_id)) {
+                to_be_visited_id[count_no_visited] = neighbor_id;
+                ++count_no_visited;
+            }
+        }
+
+        return count_no_visited;
+    }
+
+    for (uint32_t i = 0; i < neighbor_count; ++i) {
+        if (i + prefetch_stride_visit_ < neighbor_count) {
             vl->Prefetch(neighbors[i + prefetch_stride_visit_]);
         }
-        if (not vl->Get(neighbors[i])) {
-            vl->Set(neighbors[i]);
-            // Removed filter->CheckValid() to eliminate duplicate filter checking.
-            // Filter is applied at result-collection stage.
-            // ShouldVisit() probabilistically gates traversal to preserve graph connectivity.
-            if (not filter || count_no_visited == 0 || skip_strategy == nullptr ||
-                skip_strategy->ShouldVisit()) {
-                to_be_visited_id[count_no_visited] = neighbors[i];
-                count_no_visited++;
-            }
+
+        const auto neighbor_id = neighbors[i];
+        // Removed filter->CheckValid() to eliminate duplicate filter checking.
+        // Filter is applied at result-collection stage.
+        // ShouldVisit() probabilistically gates traversal to preserve graph connectivity.
+        if (vl->CheckAndSet(neighbor_id) and
+            (count_no_visited == 0 || skip_strategy == nullptr || skip_strategy->ShouldVisit())) {
+            to_be_visited_id[count_no_visited] = neighbor_id;
+            ++count_no_visited;
         }
     }
     return count_no_visited;
@@ -137,7 +169,8 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
         return top_candidates;
     }
 
-    auto computer = flatten->FactoryComputer(query);
+    auto computer_lease = AcquireQueryComputer(flatten, query, ctx);
+    const auto& computer = computer_lease.computer;
 
     auto is_id_allowed = inner_search_param.is_inner_id_allowed;
     auto ep = inner_search_param.ep;
@@ -155,12 +188,12 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
     Vector<InnerIdType> neighbors(graph->MaximumDegree(), alloc);
     Vector<float> line_dists(graph->MaximumDegree(), alloc);
     Vector<float> lower_bound_dists(graph->MaximumDegree(), alloc);
-    auto skip_strategy = create_filter_search_skip_strategy(
-        inner_search_param.skip_strategy_type,
-        inner_search_param.is_inner_id_allowed != nullptr
-            ? inner_search_param.is_inner_id_allowed->ValidRatio()
-            : 1.0F,
-        inner_search_param.skip_ratio);
+    FilterSearchSkipStrategyPtr skip_strategy = nullptr;
+    if (inner_search_param.is_inner_id_allowed != nullptr) {
+        const auto valid_ratio = inner_search_param.is_inner_id_allowed->ValidRatio();
+        skip_strategy = create_filter_search_skip_strategy(
+            inner_search_param.skip_strategy_type, valid_ratio, inner_search_param.skip_ratio);
+    }
     if (rabitq_lower_bound_candidates != nullptr) {
         rabitq_lower_bound_candidates->clear();
     }
@@ -176,7 +209,7 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
             if (iter_ctx->CheckPoint(cur_inner_id)) {
                 flatten->Query(&cur_dist, computer, &cur_inner_id, 1, ctx);
                 // Sign convention: top_candidates stores positive distances (nearest = smallest);
-                // candidate_set is a max-heap, so distances are negated (nearest = largest, popped first).
+                // candidate_set is a max-heap, so distances are negated.
                 top_candidates->Push(cur_dist, cur_inner_id);
                 candidate_set->Push(-cur_dist, cur_inner_id);
                 if constexpr (mode == InnerSearchMode::RANGE_SEARCH) {
@@ -337,7 +370,8 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
         return top_candidates;
     }
 
-    auto computer = flatten->FactoryComputer(query);
+    auto computer_lease = AcquireQueryComputer(flatten, query, ctx);
+    const auto& computer = computer_lease.computer;
 
     auto is_id_allowed = inner_search_param.is_inner_id_allowed;
     auto ep = inner_search_param.ep;
@@ -353,12 +387,12 @@ BasicSearcher::search_impl(const GraphInterfacePtr& graph,
     Vector<InnerIdType> neighbors(graph->MaximumDegree(), alloc);
     Vector<float> line_dists(graph->MaximumDegree(), alloc);
     Vector<float> lower_bound_dists(graph->MaximumDegree(), alloc);
-    auto skip_strategy = create_filter_search_skip_strategy(
-        inner_search_param.skip_strategy_type,
-        inner_search_param.is_inner_id_allowed != nullptr
-            ? inner_search_param.is_inner_id_allowed->ValidRatio()
-            : 1.0F,
-        inner_search_param.skip_ratio);
+    FilterSearchSkipStrategyPtr skip_strategy = nullptr;
+    if (inner_search_param.is_inner_id_allowed != nullptr) {
+        const auto valid_ratio = inner_search_param.is_inner_id_allowed->ValidRatio();
+        skip_strategy = create_filter_search_skip_strategy(
+            inner_search_param.skip_strategy_type, valid_ratio, inner_search_param.skip_ratio);
+    }
     if (rabitq_lower_bound_candidates != nullptr) {
         rabitq_lower_bound_candidates->clear();
     }

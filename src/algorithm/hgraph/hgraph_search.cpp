@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +36,7 @@
 #include "impl/filter/filter_headers.h"
 #include "impl/filter/iterator_filter.h"
 #include "impl/heap/standard_heap.h"
+#include "impl/query_computer_pool.h"
 #include "impl/reasoning/search_reasoning.h"
 #include "utils/util_functions.h"
 
@@ -112,6 +129,8 @@ HGraph::KnnSearch(const DatasetPtr& query,
     auto* iter_filter_ctx = static_cast<IteratorFilterContext*>(iter_ctx);
     auto search_result = DistanceHeap::MakeInstanceBySize<true, false>(ctx.alloc, k);
     const auto* query_data = get_data(query);
+    QueryComputerPool query_computer_pool(query_data, &stats);
+    ctx.computer_pool = &query_computer_pool;
     // Note: brute_force_threshold is intentionally not applied here. The
     // iterator KnnSearch API pages results across multiple calls via
     // iter_filter_ctx; a single brute-force sweep would either need to drive
@@ -316,7 +335,8 @@ HGraph::brute_force_search(const void* query,
         return result;
     }
 
-    auto computer = flatten->FactoryComputer(query);
+    auto computer_lease = AcquireQueryComputer(flatten, query, ctx);
+    const auto& computer = computer_lease.computer;
 
     constexpr InnerIdType brute_force_batch_size = 64;
     Vector<InnerIdType> batch_ids(brute_force_batch_size, alloc);
@@ -404,6 +424,10 @@ HGraph::SearchWithRequest(const SearchRequest& request) const {
     }
     k = std::min(k, GetNumElements());
 
+    const auto* raw_query = get_data(query);
+    QueryComputerPool query_computer_pool(raw_query, &stats);
+    ctx.computer_pool = &query_computer_pool;
+
     // Setup reasoning context (KNN only)
     std::shared_ptr<ReasoningContext> reasoning_ctx;
     if (not is_range and not request.expected_labels_.empty()) {
@@ -422,7 +446,6 @@ HGraph::SearchWithRequest(const SearchRequest& request) const {
             request.expected_labels_.begin(), request.expected_labels_.end(), this->allocator_);
         reasoning_ctx->InitializeExpectedTargets(expected_labels_vec, label_to_inner_id);
 
-        const auto* const query_vector = get_data(query);
         auto precise_flatten = this->basic_flatten_codes_;
         if (use_reorder_) {
             precise_flatten = this->high_precise_codes_;
@@ -430,7 +453,8 @@ HGraph::SearchWithRequest(const SearchRequest& request) const {
         if (create_new_raw_vector_) {
             precise_flatten = this->raw_vector_;
         }
-        auto computer = precise_flatten->FactoryComputer(query_vector);
+        auto computer_lease = AcquireQueryComputer(precise_flatten, raw_query, &ctx);
+        const auto& computer = computer_lease.computer;
         for (const auto& pair : label_to_inner_id) {
             float dist = 0.0F;
             const auto inner_id = pair.second;
@@ -452,7 +476,6 @@ HGraph::SearchWithRequest(const SearchRequest& request) const {
 
     auto vt = this->pool_->TakeOne();
 
-    const auto* raw_query = get_data(query);
     for (auto i = static_cast<int64_t>(this->route_graphs_.size() - 1); i >= 0; --i) {
         auto result = this->search_one_graph(
             raw_query, this->route_graphs_[i], this->basic_flatten_codes_, search_param, vt, &ctx);
