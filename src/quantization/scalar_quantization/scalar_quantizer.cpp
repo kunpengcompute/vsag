@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -193,6 +208,67 @@ ScalarQuantizer<metric, bit>::ComputeDistImpl(Computer<ScalarQuantizer>& compute
     } else {
         logger::error("unsupported metric type");
         dists[0] = 0;
+    }
+}
+
+template <MetricType metric, int bit>
+void
+ScalarQuantizer<metric, bit>::ComputeDistsBatch4Impl(Computer<ScalarQuantizer>& computer,
+                                                     const uint8_t* codes1,
+                                                     const uint8_t* codes2,
+                                                     const uint8_t* codes3,
+                                                     const uint8_t* codes4,
+                                                     float& dists1,
+                                                     float& dists2,
+                                                     float& dists3,
+                                                     float& dists4) const {
+    static_assert(bit == 4 || bit == 8, "bit must be 4 or 8");
+    auto* buf = reinterpret_cast<float*>(computer.buf_);
+    if constexpr (bit == 8) {
+        if constexpr (metric == MetricType::METRIC_TYPE_L2SQR) {
+            SQ8ComputeL2SqrBatch4(buf,
+                                  this->dim_,
+                                  codes1,
+                                  codes2,
+                                  codes3,
+                                  codes4,
+                                  lower_bound_.data(),
+                                  diff_.data(),
+                                  dists1,
+                                  dists2,
+                                  dists3,
+                                  dists4);
+        } else if constexpr (metric == MetricType::METRIC_TYPE_IP or
+                             metric == MetricType::METRIC_TYPE_COSINE) {
+            SQ8ComputeIPBatch4(buf,
+                               this->dim_,
+                               codes1,
+                               codes2,
+                               codes3,
+                               codes4,
+                               lower_bound_.data(),
+                               diff_.data(),
+                               dists1,
+                               dists2,
+                               dists3,
+                               dists4);
+            dists1 = 1 - dists1;
+            dists2 = 1 - dists2;
+            dists3 = 1 - dists3;
+            dists4 = 1 - dists4;
+        } else {
+            logger::error("unsupported metric type");
+            dists1 = 0;
+            dists2 = 0;
+            dists3 = 0;
+            dists4 = 0;
+        }
+    } else {
+        // SQ4 codes are packed nibbles; fall back to the single-code path
+        this->ComputeDistImpl(computer, codes1, &dists1);
+        this->ComputeDistImpl(computer, codes2, &dists2);
+        this->ComputeDistImpl(computer, codes3, &dists3);
+        this->ComputeDistImpl(computer, codes4, &dists4);
     }
 }
 
