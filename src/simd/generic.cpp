@@ -14,7 +14,6 @@
     limitations under the License.
 */
 
-
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,10 +28,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "simd.h"
-
 #include <cmath>
 #include <cstring>
+
+#include "simd.h"
 
 #ifdef __aarch64__
 #include <arm_neon.h>
@@ -363,6 +362,62 @@ SQ8ComputeCodesL2Sqr(const uint8_t* RESTRICT codes1,
 }
 
 void
+SQ8ComputeIPBatch4(const float* RESTRICT query,
+                   uint64_t dim,
+                   const uint8_t* RESTRICT codes1,
+                   const uint8_t* RESTRICT codes2,
+                   const uint8_t* RESTRICT codes3,
+                   const uint8_t* RESTRICT codes4,
+                   const float* RESTRICT lower_bound,
+                   const float* RESTRICT diff,
+                   float& result1,
+                   float& result2,
+                   float& result3,
+                   float& result4) {
+    simd::SQ8ComputeBatch4Impl<simd::SQ8Traits<simd::Generic_SQ8_Tag>, simd::SQ8Batch4Kind::IP>(
+        query,
+        dim,
+        codes1,
+        codes2,
+        codes3,
+        codes4,
+        lower_bound,
+        diff,
+        result1,
+        result2,
+        result3,
+        result4);
+}
+
+void
+SQ8ComputeL2SqrBatch4(const float* RESTRICT query,
+                      uint64_t dim,
+                      const uint8_t* RESTRICT codes1,
+                      const uint8_t* RESTRICT codes2,
+                      const uint8_t* RESTRICT codes3,
+                      const uint8_t* RESTRICT codes4,
+                      const float* RESTRICT lower_bound,
+                      const float* RESTRICT diff,
+                      float& result1,
+                      float& result2,
+                      float& result3,
+                      float& result4) {
+    simd::SQ8ComputeBatch4Impl<simd::SQ8Traits<simd::Generic_SQ8_Tag>, simd::SQ8Batch4Kind::L2>(
+        query,
+        dim,
+        codes1,
+        codes2,
+        codes3,
+        codes4,
+        lower_bound,
+        diff,
+        result1,
+        result2,
+        result3,
+        result4);
+}
+
+void
 SQ8SparseAccumulate(float* RESTRICT dists,
                     const uint16_t* RESTRICT ids,
                     const uint8_t* RESTRICT vals,
@@ -502,6 +557,20 @@ SQ8UniformComputeCodesIPBatch(const uint8_t* RESTRICT query,
     for (uint64_t i = 0; i < n_codes; ++i) {
         out[i] = generic::SQ8UniformComputeCodesIP(query, codes + i * code_stride, dim);
     }
+}
+
+void
+SQ8UniformComputeCodesIPBatch4(const uint8_t* RESTRICT query,
+                               const uint8_t* RESTRICT codes1,
+                               const uint8_t* RESTRICT codes2,
+                               const uint8_t* RESTRICT codes3,
+                               const uint8_t* RESTRICT codes4,
+                               uint64_t dim,
+                               float* RESTRICT out) {
+    out[0] = generic::SQ8UniformComputeCodesIP(query, codes1, dim);
+    out[1] = generic::SQ8UniformComputeCodesIP(query, codes2, dim);
+    out[2] = generic::SQ8UniformComputeCodesIP(query, codes3, dim);
+    out[3] = generic::SQ8UniformComputeCodesIP(query, codes4, dim);
 }
 
 float
@@ -947,7 +1016,7 @@ DivScalar(const float* from, float* to, uint64_t dim, float scalar) {
 }
 
 void
-Prefetch(const void* data){};
+Prefetch(const void* data) {};
 
 void
 PQFastScanLookUp32(const uint8_t* RESTRICT lookup_table,

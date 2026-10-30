@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -19,6 +34,13 @@
 namespace vsag {
 
 VSAG_DEFINE_SIMD_DISPATCH(SQ8UniformComputeCodesIP, SQ8UniformComputeCodesType);
+
+// Batch4 IP dispatch: no AMX real implementation exists (a single AMX
+// tile setup does not amortize over 4 dot products), so the standard
+// cascade (AVX512 -> ... -> SVE -> NEON -> generic) is enough. On every
+// non-SVE ISA the entry point is a thin wrapper that runs the single-code
+// IP 4 times, exactly like the quantizer's previous fallback did.
+VSAG_DEFINE_SIMD_DISPATCH(SQ8UniformComputeCodesIPBatch4, SQ8UniformComputeCodesIPBatch4Type);
 
 // Batch IP dispatch. Prefer AMX when available; otherwise fall back to
 // the same cascade as the scalar entry point. This keeps the macro
