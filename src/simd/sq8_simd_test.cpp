@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -131,6 +146,59 @@ TEST_CASE("SQ8 SIMD Compute", "[ut][simd]") {
         for (uint64_t i = 0; i < count; ++i) {
             TEST_ACCURACY_QUERY(SQ8ComputeIP);
             TEST_ACCURACY_QUERY(SQ8ComputeL2Sqr);
+        }
+    }
+}
+
+// ---------------- batch4 correctness: 4 independent code pointers ----------------
+
+#define TEST_BATCH4_NS(NS, Cond, Func)                                                            \
+    if (Cond) {                                                                                   \
+        float r1 = 0.0f, r2 = 0.0f, r3 = 0.0f, r4 = 0.0f;                                         \
+        NS::Func(                                                                                 \
+            query.data() + i * dim, dim, c1, c2, c3, c4, lb.data(), diff.data(), r1, r2, r3, r4); \
+        REQUIRE(fixtures::dist_t(r1) == fixtures::dist_t(gt[0]));                                 \
+        REQUIRE(fixtures::dist_t(r2) == fixtures::dist_t(gt[1]));                                 \
+        REQUIRE(fixtures::dist_t(r3) == fixtures::dist_t(gt[2]));                                 \
+        REQUIRE(fixtures::dist_t(r4) == fixtures::dist_t(gt[3]));                                 \
+    }
+
+#define TEST_ACCURACY_BATCH4(Func, Single)                                                        \
+    {                                                                                             \
+        const uint8_t* ccs[4] = {c1, c2, c3, c4};                                                 \
+        std::vector<float> gt(4);                                                                 \
+        for (int k = 0; k < 4; ++k) {                                                             \
+            gt[k] = generic::Single(query.data() + i * dim, ccs[k], lb.data(), diff.data(), dim); \
+        }                                                                                         \
+        TEST_BATCH4_NS(sse, SimdStatus::SupportSSE(), Func)                                       \
+        TEST_BATCH4_NS(avx, SimdStatus::SupportAVX(), Func)                                       \
+        TEST_BATCH4_NS(avx2, SimdStatus::SupportAVX2(), Func)                                     \
+        TEST_BATCH4_NS(avx512, SimdStatus::SupportAVX512(), Func)                                 \
+        TEST_BATCH4_NS(neon, SimdStatus::SupportNEON(), Func)                                     \
+        TEST_BATCH4_NS(sve, SimdStatus::SupportSVE(), Func)                                       \
+    }
+
+TEST_CASE("SQ8 SIMD Compute Batch4", "[ut][simd]") {
+    auto dims = fixtures::get_common_used_dims();
+    int64_t count = 50;
+    for (const auto& dim : dims) {
+        auto query = fixtures::generate_vectors(count, dim);
+        std::vector<uint8_t> codes(4 * count * dim);
+        {
+            auto fvec = fixtures::generate_vectors(4 * count, dim);
+            std::transform(fvec.begin(), fvec.end(), codes.begin(), [](float x) {
+                return static_cast<uint8_t>(x * 255.0);
+            });
+        }
+        auto lb = fixtures::generate_vectors(1, dim, true, 186);
+        auto diff = fixtures::generate_vectors(1, dim, true, 657);
+        for (uint64_t i = 0; i < count; ++i) {
+            const uint8_t* c1 = codes.data() + (4 * i + 0) * dim;
+            const uint8_t* c2 = codes.data() + (4 * i + 1) * dim;
+            const uint8_t* c3 = codes.data() + (4 * i + 2) * dim;
+            const uint8_t* c4 = codes.data() + (4 * i + 3) * dim;
+            TEST_ACCURACY_BATCH4(SQ8ComputeIPBatch4, SQ8ComputeIP);
+            TEST_ACCURACY_BATCH4(SQ8ComputeL2SqrBatch4, SQ8ComputeL2Sqr);
         }
     }
 }

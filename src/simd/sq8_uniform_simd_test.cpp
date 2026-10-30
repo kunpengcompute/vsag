@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -215,4 +230,69 @@ TEST_CASE("SQ8 Uniform SIMD Compute Codes Batch Benchmark", "[ut][simd][!benchma
         BENCHMARK_SIMD_BATCH(neon);
     if (SimdStatus::SupportSVE())
         BENCHMARK_SIMD_BATCH(sve);
+}
+
+// ---------------- batch4 IP correctness (4 independent code pointers) ----------------
+
+TEST_CASE("SQ8 Uniform SIMD Compute Codes Batch4", "[ut][simd]") {
+    // Same dim coverage as the strided batch test: 64-multiples hit the
+    // full-vector AMX/AVX-512/SVE paths, odd sizes the predicated tails.
+    const std::vector<int64_t> dims = {32, 48, 64, 96, 128, 192, 200, 256, 384, 512};
+    const int64_t count = 24;  // groups of 4 independent code pointers
+
+    for (auto dim : dims) {
+        auto query = fixtures::generate_uint8_codes(1, dim, 31);
+        auto codes = fixtures::generate_uint8_codes(count, dim, 17);
+
+        for (int64_t i = 0; i + 3 < count; i += 4) {
+            // Ground truth: 4 independent single-code IPs (integer-exact).
+            std::vector<float> gt(4), got(4);
+            for (int k = 0; k < 4; ++k) {
+                gt[k] = generic::SQ8UniformComputeCodesIP(
+                    query.data(), codes.data() + (i + k) * dim, dim);
+            }
+
+            // Dispatch entry point used by the quantizer's batch4 path.
+            std::fill(got.begin(), got.end(), 0.F);
+            SQ8UniformComputeCodesIPBatch4(query.data(),
+                                           codes.data() + i * dim,
+                                           codes.data() + (i + 1) * dim,
+                                           codes.data() + (i + 2) * dim,
+                                           codes.data() + (i + 3) * dim,
+                                           dim,
+                                           got.data());
+            for (int k = 0; k < 4; ++k) {
+                REQUIRE(fixtures::dist_t(got[k]) == fixtures::dist_t(gt[k]));
+            }
+
+            // Every available ISA's per-namespace implementation. The
+            // SVE kernel accumulates exact u8*u8 products in uint32 like
+            // the single-code path; other ISAs wrap the single-code call.
+#define TEST_BATCH4_NS(NS, Cond)                                          \
+    if (Cond) {                                                           \
+        std::fill(got.begin(), got.end(), 0.F);                           \
+        NS::SQ8UniformComputeCodesIPBatch4(query.data(),                  \
+                                           codes.data() + i * dim,        \
+                                           codes.data() + (i + 1) * dim,  \
+                                           codes.data() + (i + 2) * dim,  \
+                                           codes.data() + (i + 3) * dim,  \
+                                           dim,                           \
+                                           got.data());                   \
+        for (int k = 0; k < 4; ++k) {                                     \
+            REQUIRE(fixtures::dist_t(got[k]) == fixtures::dist_t(gt[k])); \
+        }                                                                 \
+    }
+            TEST_BATCH4_NS(generic, true);
+            TEST_BATCH4_NS(sse, SimdStatus::SupportSSE());
+            TEST_BATCH4_NS(avx, SimdStatus::SupportAVX());
+            TEST_BATCH4_NS(avx2, SimdStatus::SupportAVX2());
+            TEST_BATCH4_NS(avx512, SimdStatus::SupportAVX512());
+#if defined(ENABLE_AMX)
+            TEST_BATCH4_NS(amx, SimdStatus::SupportAMX());
+#endif
+            TEST_BATCH4_NS(neon, SimdStatus::SupportNEON());
+            TEST_BATCH4_NS(sve, SimdStatus::SupportSVE());
+#undef TEST_BATCH4_NS
+        }
+    }
 }
