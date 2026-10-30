@@ -63,7 +63,7 @@ dev:                     ## Build full developer configuration.
 
 .PHONY: test
 test:                    ## Build and run unit tests.
-	cmake ${VSAG_CMAKE_ARGS} -B${DEBUG_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=OFF -DENABLE_CCACHE=ON -DENABLE_TESTS=ON -DENABLE_MOCKIMPL=ON
+	cmake ${VSAG_CMAKE_ARGS} -B${DEBUG_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=OFF -DENABLE_CCACHE=ON -DENABLE_TESTS=ON -DENABLE_MOCKIMPL=ON -DCMAKE_CXX_FLAGS="-w"
 	cmake --build ${DEBUG_BUILD_DIR} --parallel ${COMPILE_JOBS}
 	./build/tests/unittests -d yes ${UT_FILTER} --allow-running-no-tests ${UT_SHARD}
 	./build/tests/functests -d yes ${UT_FILTER} --allow-running-no-tests ${UT_SHARD}
@@ -135,7 +135,7 @@ test_tsan_parallel: tsan ## Run unit tests parallel with ThreadSanitizer option.
 ## ================ distribution ================
 .PHONY: release
 release:                 ## Build vsag with release options.
-	cmake ${VSAG_CMAKE_ARGS} -B${RELEASE_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release
+	cmake ${VSAG_CMAKE_ARGS} -B${RELEASE_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-w" -DENABLE_CCACHE=ON
 	cmake --build ${RELEASE_BUILD_DIR} --parallel ${COMPILE_JOBS}
 
 .PHONY: run-dist-tests

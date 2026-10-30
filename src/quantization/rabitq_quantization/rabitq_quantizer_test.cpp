@@ -772,3 +772,86 @@ TEST_CASE("RaBitQ Query SQ Transform With All Same Element", "[ut][RaBitQuantize
         REQUIRE(is_approx_zero(original_data[i] - decode_data[i]));
     }
 }
+
+TEST_CASE("RaBitQ Batch Mode Bit Width Guard", "[ut][RaBitQuantizer]") {
+    constexpr auto dim = 64;
+    constexpr auto count = 32;
+    auto allocator = SafeAllocator::FactoryDefaultAllocator();
+    auto vecs = fixtures::generate_vectors(count + 1, dim);
+
+    // the batch kernel only supports the fp32-query / 1-bit-base combination
+    const std::vector<std::pair<uint64_t, uint64_t>> bit_cases = {
+        {32, 1}, {32, 2}, {32, 4}, {32, 8}, {4, 1}};
+
+    for (const auto& [query_bits, base_bits] : bit_cases) {
+        RaBitQuantizer<MetricType::METRIC_TYPE_L2SQR> quantizer(
+            dim,
+            dim,
+            query_bits,
+            base_bits,
+            /*use_fht=*/false,
+            /*use_mrq=*/false,
+            allocator.get(),
+            RaBitQuantizerParameter::DEFAULT_RABITQ_VERSION,
+            RaBitQuantizerParameter::DEFAULT_RABITQ_ERROR_RATE,
+            RaBitQuantizerParameter::DEFAULT_RABITQ_BITS_PER_DIM_FILTER,
+            /*rabitq_enable_batch=*/true);
+        REQUIRE(quantizer.TrainImpl(vecs.data(), count + 1));
+
+        // batch mode must be limited to query=32 bit with base=1 bit
+        REQUIRE(quantizer.GetBatchMode() == ((query_bits == 32 && base_bits == 1) ? 1 : 0));
+
+        const auto code_size = quantizer.GetCodeSize();
+        std::vector<uint8_t> codes(static_cast<uint64_t>(count) * code_size, 0);
+        for (uint32_t i = 0; i < count; ++i) {
+            REQUIRE(quantizer.EncodeOne(vecs.data() + i * dim, codes.data() + i * code_size));
+        }
+
+        auto computer = quantizer.FactoryComputer();
+        computer->SetQuery(vecs.data() + static_cast<uint64_t>(count) * dim);
+
+        // batch distances must match the regular per-code distances on the same codes
+        std::vector<uint32_t> idx(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            idx[i] = i;
+        }
+        std::vector<float> batch_dists(count, 0.0F);
+        quantizer.ComputeDistsBatchTransposedImpl(
+            *computer, codes.data(), idx.data(), count, batch_dists.data());
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto single_dist = quantizer.ComputeDist(*computer, codes.data() + i * code_size);
+            REQUIRE(std::abs(batch_dists[i] - single_dist) <= 1e-2F);
+        }
+
+        if (base_bits > 1) {
+            // multi-bit codes are stored as bit planes at the head of the code;
+            // flip every plane byte to reflect the quantized vector around its
+            // center while leaving the stored meta fields (norms, error) intact
+            const uint64_t plane_bytes = (dim + 7) / 8;
+            const uint64_t plane_region = plane_bytes * base_bits;
+            std::vector<uint8_t> flipped(codes.begin(), codes.begin() + code_size);
+            for (uint64_t b = 0; b < plane_region; ++b) {
+                flipped[b] ^= 0xFFU;
+            }
+
+            // the planes must affect the regular distance; higher planes are
+            // refinement terms, so the effect stays small but must remain far
+            // above float noise
+            const auto dist_origin = quantizer.ComputeDist(*computer, codes.data());
+            const auto dist_flipped = quantizer.ComputeDist(*computer, flipped.data());
+            REQUIRE(std::abs(dist_origin - dist_flipped) > 1e-5F);
+
+            // the batch interface must agree with the regular per-code path on
+            // both the original and the flipped codes
+            const uint32_t flip_idx[1] = {0};
+            float batch_origin[1] = {0.0F};
+            float batch_flipped[1] = {0.0F};
+            quantizer.ComputeDistsBatchTransposedImpl(
+                *computer, codes.data(), flip_idx, 1, batch_origin);
+            quantizer.ComputeDistsBatchTransposedImpl(
+                *computer, flipped.data(), flip_idx, 1, batch_flipped);
+            REQUIRE(std::abs(batch_origin[0] - dist_origin) <= 1e-6F);
+            REQUIRE(std::abs(batch_flipped[0] - dist_flipped) <= 1e-6F);
+        }
+    }
+}

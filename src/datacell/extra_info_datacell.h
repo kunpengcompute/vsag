@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -85,6 +101,9 @@ public:
 
     void
     Move(InnerIdType from, InnerIdType to) override;
+
+    void
+    PermuteEntries(const Vector<InnerIdType>& perm) override;
 
     void
     ShrinkToFit(InnerIdType capacity) override {
@@ -205,5 +224,25 @@ ExtraInfoDataCell<IOTmpl>::Move(InnerIdType from, InnerIdType to) {
     if (need_release) {
         this->io_->Release(reinterpret_cast<const uint8_t*>(extra_info));
     }
+}
+
+template <typename IOTmpl>
+void
+ExtraInfoDataCell<IOTmpl>::PermuteEntries(const Vector<InnerIdType>& perm) {
+    const uint64_t total_count = this->total_count_;
+    if (perm.size() < total_count) {
+        throw VsagException(ErrorType::INTERNAL_ERROR,
+                            "extra info perm size is smaller than total count");
+    }
+    if (total_count == 0 || this->extra_info_size_ == 0) {
+        return;
+    }
+
+    ByteBuffer new_infos(total_count * this->extra_info_size_, allocator_);
+    for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+        auto* dst = new_infos.data + static_cast<uint64_t>(new_id) * this->extra_info_size_;
+        this->GetExtraInfoById(perm[new_id], reinterpret_cast<char*>(dst));
+    }
+    this->io_->Write(new_infos.data, total_count * this->extra_info_size_, 0);
 }
 }  // namespace vsag

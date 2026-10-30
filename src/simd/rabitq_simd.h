@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -16,6 +32,12 @@
 #pragma once
 
 #include <cstdint>
+
+#ifdef __aarch64__
+typedef __fp16 float16_t;
+#else
+typedef uint16_t float16_t;
+#endif
 
 namespace vsag {
 
@@ -469,6 +491,21 @@ FlipSign(const uint8_t* flip, float* data, uint64_t dim);
 
 void
 RotateOp(float* data, int idx, int dim_, int step);
+
+void
+RaBitQFloatBuild4BitLookupTable(const float* query,
+                                uint64_t dim,
+                                float inv_sqrt_d,
+                                float16_t* table);
+
+void
+RaBitQFloatBatchBinaryIPBy4BitLookup(const uint8_t* codes,
+                                     uint64_t ncode,
+                                     uint64_t dim,
+                                     uint64_t code_stride,
+                                     const float16_t* table,
+                                     float* out,
+                                     const uint32_t* idx);
 }  // namespace generic
 
 namespace neon {
@@ -568,6 +605,9 @@ uint32_t
 RaBitQSQ4UBinaryIP(const uint8_t* codes, const uint8_t* bits, uint64_t dim);
 
 void
+BuildBinaryQueryLookupTable(const float* vector, uint64_t dim, float inv_sqrt_d, float* lookup);
+
+void
 KacsWalk(float* data, uint64_t len);
 
 void
@@ -581,6 +621,21 @@ FlipSign(const uint8_t* flip, float* data, uint64_t dim);
 
 void
 RotateOp(float* data, int idx, int dim_, int step);
+
+void
+RaBitQFloatBuild4BitLookupTable(const float* query,
+                                uint64_t dim,
+                                float inv_sqrt_d,
+                                float16_t* table);
+
+void
+RaBitQFloatBatchBinaryIPBy4BitLookup(const uint8_t* codes,
+                                     uint64_t ncode,
+                                     uint64_t dim,
+                                     uint64_t code_stride,
+                                     const float16_t* table,
+                                     float* out,
+                                     const uint32_t* idx);
 }  // namespace sve
 
 using RaBitQFloatBinaryType = float (*)(const float* vector,
@@ -675,6 +730,19 @@ using RaBitQSQ4UBinaryType = uint32_t (*)(const uint8_t* codes, const uint8_t* b
 
 using RaBitQFloatSQType = float (*)(const float* vector, const uint8_t* codes, uint64_t dim);
 
+using RaBitQFloatBuild4BitLookupTableType = void (*)(const float* query,
+                                                     uint64_t dim,
+                                                     float inv_sqrt_d,
+                                                     float16_t* table);
+
+using RaBitQFloatBatchBinaryIPBy4BitLookupType = void (*)(const uint8_t* codes,
+                                                          uint64_t ncode,
+                                                          uint64_t dim,
+                                                          uint64_t code_stride,
+                                                          const float16_t* table,
+                                                          float* out,
+                                                          const uint32_t* idx);
+
 using FHTRotateType = void (*)(float* data, uint64_t dim_);
 
 using KacsWalkType = void (*)(float* data, uint64_t len);
@@ -686,6 +754,7 @@ using FlipSignType = void (*)(const uint8_t* flip, float* data, uint64_t dim);
 using RotateOpType = void (*)(float* data, int idx, int dim_, int step);
 extern RaBitQFloatBinaryType RaBitQFloatBinaryIP;
 extern RaBitQFloatBinaryBatch4Type RaBitQFloatBinaryIPBatch4;
+extern bool RaBitQFloatBinaryIPUsesLookup;
 extern RaBitQFloatThreeBitBatch4Type RaBitQFloatThreeBitIPBatch4;
 extern RaBitQFloatTwoBitCenteredType RaBitQFloatTwoBitCenteredIP;
 extern RaBitQFloatTwoBitCenteredBatch4Type RaBitQFloatTwoBitCenteredIPBatch4;
@@ -704,4 +773,6 @@ extern KacsWalkType KacsWalk;
 extern VecRescaleType VecRescale;
 extern FlipSignType FlipSign;
 extern RotateOpType RotateOp;
+extern RaBitQFloatBuild4BitLookupTableType RaBitQFloatBuild4BitLookupTable;
+extern RaBitQFloatBatchBinaryIPBy4BitLookupType RaBitQFloatBatchBinaryIPBy4BitLookup;
 }  // namespace vsag

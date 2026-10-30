@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +32,7 @@
 
 #include <algorithm>
 #include <catch2/benchmark/catch_benchmark.hpp>
+#include <limits>
 
 #include "fp32_simd.h"
 #include "simd_status.h"
@@ -229,6 +246,65 @@ TEST_CASE("RaBitQ FP32-BQ SIMD Batch4 Compute Codes", "[ut][simd]") {
             sve::RaBitQFloatBinaryIPBatch4(
                 query.data(), bits1, bits2, bits3, bits4, dim, inv_sqrt_d, result);
             check_result(result);
+        }
+    }
+}
+
+TEST_CASE("RaBitQ FP32-BQ Binary Query Lookup Table", "[ut][simd]") {
+    // The SVE binary-query LUT is built once per query and consumed by passing NaN
+    // as inv_sqrt_d (the query argument then points at the table). sve.cpp compiles
+    // on every platform with the SVE intrinsics disabled, so the checks below also
+    // exercise the portable fallback used by SVE machines with non-256-bit vectors.
+    const std::vector<uint64_t> dims = {0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 960};
+    const float lut_inv_sqrt_d = std::numeric_limits<float>::quiet_NaN();
+
+    for (const auto dim : dims) {
+        const uint64_t code_size = (dim + 7) / 8;
+        const float inv_sqrt_d = dim == 0 ? 1.0F : 1.0F / std::sqrt(static_cast<float>(dim));
+        std::vector<float> query(dim);
+        for (uint64_t d = 0; d < dim; ++d) {
+            query[d] = static_cast<float>(static_cast<int>(d % 23) - 11) * 0.03125F;
+        }
+
+        std::vector<float> lookup(std::max<uint64_t>(1, code_size * 256));
+        sve::BuildBinaryQueryLookupTable(query.data(), dim, inv_sqrt_d, lookup.data());
+
+        // Every table entry must agree with the direct (non-LUT) computation. Only
+        // the current block holds a non-zero byte, which pins down the entry
+        // lookup[block * 256 + byte_value] for all 256 byte values of every block.
+        std::vector<uint8_t> bits(std::max<uint64_t>(1, code_size), 0);
+        for (uint64_t block = 0; block < code_size; ++block) {
+            for (uint32_t byte_value = 0; byte_value < 256; ++byte_value) {
+                bits[block] = static_cast<uint8_t>(byte_value);
+                const float expected =
+                    generic::RaBitQFloatBinaryIP(query.data(), bits.data(), dim, inv_sqrt_d);
+                const float actual =
+                    sve::RaBitQFloatBinaryIP(lookup.data(), bits.data(), dim, lut_inv_sqrt_d);
+                REQUIRE(std::abs(expected - actual) < 1e-4F);
+            }
+            bits[block] = 0;
+        }
+
+        // The batch4 consumer must agree with the direct computation as well.
+        std::vector<uint8_t> bases(std::max<uint64_t>(1, code_size * 4));
+        for (uint64_t i = 0; i < bases.size(); ++i) {
+            bases[i] = static_cast<uint8_t>(31U * i + 17U);
+        }
+        const auto* bits1 = bases.data();
+        const auto* bits2 = bits1 + code_size;
+        const auto* bits3 = bits2 + code_size;
+        const auto* bits4 = bits3 + code_size;
+        const float expected[4] = {
+            generic::RaBitQFloatBinaryIP(query.data(), bits1, dim, inv_sqrt_d),
+            generic::RaBitQFloatBinaryIP(query.data(), bits2, dim, inv_sqrt_d),
+            generic::RaBitQFloatBinaryIP(query.data(), bits3, dim, inv_sqrt_d),
+            generic::RaBitQFloatBinaryIP(query.data(), bits4, dim, inv_sqrt_d),
+        };
+        float result[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        sve::RaBitQFloatBinaryIPBatch4(
+            lookup.data(), bits1, bits2, bits3, bits4, dim, lut_inv_sqrt_d, result);
+        for (uint32_t i = 0; i < 4; ++i) {
+            REQUIRE(std::abs(expected[i] - result[i]) < 1e-4F);
         }
     }
 }
@@ -1196,6 +1272,85 @@ TEST_CASE("SIMD FlipSign Correctness with Patterns", "[ut][simd]") {
                 for (int i = 0; i < dim; i++) {
                     REQUIRE(gt_data[i] == original_data[i]);
                 }
+            }
+        }
+    }
+}
+
+TEST_CASE("RaBitQ 4-Bit Lookup Table SIMD", "[ut][simd]") {
+    // Regression test for the SVE2-bitperm SIGILL: sve.cpp is compiled with
+    // -march=armv8-a+sve2-bitperm, so its 4-bit lookup kernels may only be
+    // dispatched on hardware that reports SVE2-bitperm, and the plain
+    // RaBitQFloatBinaryIP kernels only on hardware that reports SVE. On every
+    // other platform the dispatch must resolve to the portable fallbacks.
+    SECTION("dispatch respects runtime SVE / SVE2-bitperm support") {
+        const bool sve_ok = SimdStatus::SupportSVE();
+        const bool bitperm_ok = SimdStatus::SupportSVE2Bitperm();
+        // SVE2-bitperm is a strict superset of plain SVE.
+        REQUIRE((not bitperm_ok or sve_ok));
+        REQUIRE((RaBitQFloatBinaryIP == sve::RaBitQFloatBinaryIP) == sve_ok);
+        REQUIRE((RaBitQFloatBinaryIPBatch4 == sve::RaBitQFloatBinaryIPBatch4) == sve_ok);
+        REQUIRE((RaBitQFloatBuild4BitLookupTable == sve::RaBitQFloatBuild4BitLookupTable) ==
+                bitperm_ok);
+        REQUIRE((RaBitQFloatBatchBinaryIPBy4BitLookup ==
+                 sve::RaBitQFloatBatchBinaryIPBy4BitLookup) == bitperm_ok);
+    }
+
+    // The SVE2-bitperm kernels may only be executed on hardware that actually
+    // supports them; everywhere else they would SIGILL.
+    if (not SimdStatus::SupportSVE2Bitperm()) {
+        return;
+    }
+
+    for (const uint64_t dim : {64U, 128U}) {
+        const uint64_t num_groups = dim / 4;
+        const uint64_t code_size = dim / 8;
+        const float inv_sqrt_d = 1.0F / std::sqrt(static_cast<float>(dim));
+        std::vector<float> query(dim);
+        for (uint64_t d = 0; d < dim; ++d) {
+            query[d] = static_cast<float>(static_cast<int64_t>(d % 23) - 11) * 0.03125F;
+        }
+
+        std::vector<float16_t> table_generic(num_groups * 16);
+        std::vector<float16_t> table_sve(num_groups * 16);
+        generic::RaBitQFloatBuild4BitLookupTable(
+            query.data(), dim, inv_sqrt_d, table_generic.data());
+        sve::RaBitQFloatBuild4BitLookupTable(query.data(), dim, inv_sqrt_d, table_sve.data());
+        for (uint64_t i = 0; i < table_generic.size(); ++i) {
+            // The builders accumulate in f32 in different orders before the f16
+            // conversion, so allow a few f16 ulps.
+            REQUIRE(std::abs(static_cast<float>(table_generic[i]) -
+                             static_cast<float>(table_sve[i])) < 1e-2F);
+        }
+
+        for (const uint64_t ncode : {1U, 5U, 9U, 17U, 33U, 70U}) {
+            // Pack the 4-bit codes as uint16 words so the SVE kernel can load
+            // them with 2-byte alignment, like the quantizer does.
+            std::vector<uint16_t> codes_u16(ncode * (code_size / 2));
+            for (uint64_t i = 0; i < codes_u16.size(); ++i) {
+                codes_u16[i] = static_cast<uint16_t>(31U * i + 17U);
+            }
+            const auto* codes = reinterpret_cast<const uint8_t*>(codes_u16.data());
+            std::vector<uint32_t> idx(ncode);
+            for (uint64_t i = 0; i < ncode; ++i) {
+                idx[i] = static_cast<uint32_t>((13U * i + 5U) % ncode);
+            }
+
+            std::vector<float> out_generic(ncode, 0.0F);
+            std::vector<float> out_sve(ncode, 0.0F);
+            generic::RaBitQFloatBatchBinaryIPBy4BitLookup(codes,
+                                                          ncode,
+                                                          dim,
+                                                          code_size,
+                                                          table_generic.data(),
+                                                          out_generic.data(),
+                                                          idx.data());
+            sve::RaBitQFloatBatchBinaryIPBy4BitLookup(
+                codes, ncode, dim, code_size, table_sve.data(), out_sve.data(), idx.data());
+            for (uint64_t i = 0; i < ncode; ++i) {
+                // The SVE kernel accumulates the f16 table entries with f16
+                // partial sums while generic accumulates in f32.
+                REQUIRE(std::abs(out_generic[i] - out_sve[i]) < 1e-2F);
             }
         }
     }

@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +33,8 @@
 #include <arm_sve.h>
 #endif
 
+#include <alloca.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -38,6 +56,92 @@ generate_bit_lookup_table() {
 static constexpr auto g_bit_lookup_table = generate_bit_lookup_table();
 
 namespace vsag::sve {
+
+namespace {
+
+float
+BinaryIPFromLookupLocal(const float* lookup, const uint8_t* bits, uint64_t dim) {
+    const uint64_t plane_bytes = (dim + 7) / 8;
+#if defined(ENABLE_SVE)
+    svfloat32_t sum = svdup_f32(0.0F);
+    uint64_t block = 0;
+    const uint64_t step = svcntw();
+    svbool_t predicate = svwhilelt_b32(block, plane_bytes);
+    while (svptest_first(svptrue_b32(), predicate)) {
+        svuint32_t block_ids = svadd_n_u32_x(
+            predicate, svindex_u32(0, 1), static_cast<uint32_t>(block));
+        svuint32_t lookup_ids = svlsl_n_u32_x(predicate, block_ids, 8);
+        lookup_ids = svadd_u32_x(predicate, lookup_ids, svld1ub_u32(predicate, bits + block));
+
+        svfloat32_t values = svld1_gather_u32index_f32(predicate, lookup, lookup_ids);
+        sum = svadd_f32_m(predicate, sum, values);
+
+        block += step;
+        predicate = svwhilelt_b32(block, plane_bytes);
+    }
+    return svaddv_f32(svptrue_b32(), sum);
+#else
+    float result = 0.0F;
+    for (uint64_t block = 0; block < plane_bytes; ++block) {
+        result += lookup[(block << 8) + bits[block]];
+    }
+    return result;
+#endif
+}
+
+void
+BinaryIPBatch4FromLookupLocal(const float* lookup,
+                              const uint8_t* bits1,
+                              const uint8_t* bits2,
+                              const uint8_t* bits3,
+                              const uint8_t* bits4,
+                              uint64_t dim,
+                              float* results) {
+    const uint64_t plane_bytes = (dim + 7) / 8;
+    uint64_t sq = 0;
+    float res1 = 0, res2 = 0, res3 = 0, res4 = 0;
+    const float* table = lookup;
+    for(; sq + 3 < plane_bytes; sq += 4) {
+        uint8_t idx1[4], idx2[4], idx3[4], idx4[4];
+        memcpy(idx1, bits1 + sq, 4);
+        memcpy(idx2, bits2 + sq, 4);
+        memcpy(idx3, bits3 + sq, 4);
+        memcpy(idx4, bits4 + sq, 4);
+        res1 += table[idx1[0]];
+        res2 += table[idx2[0]];
+        res3 += table[idx3[0]];
+        res4 += table[idx4[0]];
+        table += 256;
+        res1 += table[idx1[1]];
+        res2 += table[idx2[1]];
+        res3 += table[idx3[1]];
+        res4 += table[idx4[1]];
+        table += 256;
+        res1 += table[idx1[2]];
+        res2 += table[idx2[2]];
+        res3 += table[idx3[2]];
+        res4 += table[idx4[2]];
+        table += 256;
+        res1 += table[idx1[3]];
+        res2 += table[idx2[3]];
+        res3 += table[idx3[3]];
+        res4 += table[idx4[3]];
+        table += 256;
+    }
+    for (; sq < plane_bytes; ++sq) {
+        res1 += table[bits1[sq]];
+        res2 += table[bits2[sq]];
+        res3 += table[bits3[sq]];
+        res4 += table[bits4[sq]];
+        table += 256;
+    }
+    results[0] = res1;
+    results[1] = res2;
+    results[2] = res3;
+    results[3] = res4;
+}
+
+}  // namespace
 
 float
 L2Sqr(const void* pVect1v, const void* pVect2v, const void* qty_ptr) {
@@ -1060,6 +1164,10 @@ SQ8UniformComputeCodesIPBatch(const uint8_t* RESTRICT query,
 
 float
 RaBitQFloatBinaryIP(const float* vector, const uint8_t* bits, uint64_t dim, float inv_sqrt_d) {
+    if (std::isnan(inv_sqrt_d)) {
+        return BinaryIPFromLookupLocal(vector, bits, dim);
+    }
+
 #if defined(ENABLE_SVE)
     if (dim == 0) {
         return 0.0f;
@@ -1114,6 +1222,11 @@ RaBitQFloatBinaryIPBatch4(const float* vector,
                           uint64_t dim,
                           float inv_sqrt_d,
                           float* results) {
+    if (std::isnan(inv_sqrt_d)) {
+        BinaryIPBatch4FromLookupLocal(vector, bits1, bits2, bits3, bits4, dim, results);
+        return;
+    }
+
     neon::RaBitQFloatBinaryIPBatch4(vector, bits1, bits2, bits3, bits4, dim, inv_sqrt_d, results);
 }
 
@@ -1425,7 +1538,7 @@ KacsWalk(float* data, uint64_t len) {
 void
 FlipSign(const uint8_t* flip, float* data, uint64_t dim) {
 #if defined(ENABLE_SVE)
-    auto predicate_array = std::make_unique<uint8_t[]>(dim);
+    uint8_t* predicate_array = (uint8_t*)alloca(dim);
     const uint64_t num_bytes = dim / 8;
     for (uint64_t j = 0; j < num_bytes; ++j) {
         memcpy(&predicate_array[j * 8], g_bit_lookup_table[flip[j]].data(), 8);
@@ -1582,6 +1695,691 @@ InverseNormalizeWithCentroid(
 #else
     neon::InverseNormalizeWithCentroid(from, centroid, to, dim, norm);
 #endif
+}
+
+#if defined(ENABLE_SVE)
+
+void RaBitQFloatBuild4BitLookupTable(const float* query, uint64_t dim, float inv_sqrt_d,
+                                float16_t* table) {
+    // The vectorized path below assumes a 256-bit SVE vector (svcntw() == 8):
+    // the f16 stores write 16 lanes each and the per-byte table stride is 32.
+    // On any other vector length it would write out of bounds, so fall back
+    // to the generic implementation.
+    // The SVE table layout is also only consumed exactly when dim is a
+    // multiple of 64 (the paired lookup routine consumes 256 f16 per 64
+    // dims), so keep the layout pairing consistent with the consumer and use
+    // the generic implementation otherwise.
+    if (svcntw() != 8 || (dim & 63) != 0) {
+        generic::RaBitQFloatBuild4BitLookupTable(query, dim, inv_sqrt_d, table);
+        return;
+    }
+    const float pos = inv_sqrt_d < 1e-3F ? 1.0F : inv_sqrt_d;
+    const float neg = inv_sqrt_d < 1e-3F ? 0.0F : -inv_sqrt_d;
+    const float pattern[8] = { neg, neg, neg, neg,
+                               pos, pos, pos, pos};
+    svbool_t all_true = svptrue_b16();
+    svfloat32_t inv_sqrt_d1 = svdupq_n_f32(neg, pos, neg, pos);
+    svfloat32_t inv_sqrt_d2 = svdupq_n_f32(neg, neg, pos, pos);
+    svfloat32_t inv_sqrt_d3 = svld1_f32(all_true, pattern);
+    svfloat32_t inv_sqrt_d4_lo = svdup_n_f32(neg);
+    svfloat32_t inv_sqrt_d4_hi = svdup_n_f32(pos);
+    const uint64_t num_bytes = (dim / 8);
+    const uint64_t plus_dim = (dim & 7);
+    for (uint64_t nb = 0; nb < num_bytes; ++nb) {
+        const float* q = query + 8 * nb;
+        svfloat32_t low_res = svdup_n_f32(0);
+        svfloat32_t hig_res = svdup_n_f32(0);
+        low_res =  svmla_n_f32_m(all_true, low_res,  inv_sqrt_d1, q[0]);
+        hig_res =  svmla_n_f32_m(all_true, hig_res,  inv_sqrt_d1, q[4]);
+        low_res =  svmla_n_f32_m(all_true, low_res,  inv_sqrt_d2, q[1]);
+        hig_res =  svmla_n_f32_m(all_true, hig_res,  inv_sqrt_d2, q[5]);
+        low_res =  svmla_n_f32_m(all_true, low_res,  inv_sqrt_d3, q[2]);
+        hig_res =  svmla_n_f32_m(all_true, hig_res,  inv_sqrt_d3, q[6]);
+        svfloat32_t dim_lowhalflow = svmla_n_f32_m(all_true, low_res, inv_sqrt_d4_lo, q[3]);
+        svfloat32_t dim_lowhalfhig = svmla_n_f32_m(all_true, low_res, inv_sqrt_d4_hi, q[3]);
+        svfloat32_t dim_highalflow = svmla_n_f32_m(all_true, hig_res, inv_sqrt_d4_lo, q[7]);
+        svfloat32_t dim_highalfhig = svmla_n_f32_m(all_true, hig_res, inv_sqrt_d4_hi, q[7]);
+        svfloat16_t complate_dim_low = svuzp1_f16(svcvt_f16_f32_x(all_true, dim_lowhalflow), svcvt_f16_f32_x(all_true, dim_lowhalfhig));
+        svfloat16_t complate_dim_hig = svuzp1_f16(svcvt_f16_f32_x(all_true, dim_highalflow), svcvt_f16_f32_x(all_true, dim_highalfhig));
+        // store
+        svst1_f16(all_true, table, complate_dim_low);
+        svst1_f16(all_true, table + 16, complate_dim_hig);
+        table += 32;
+    }
+    if (plus_dim > 0) {
+        // The remaining plus_dim (= dim & 7) dims start at query + 8 * num_bytes.
+        // The first min(plus_dim, 4) of them fill the low-nibble table; the rest
+        // fill the high-nibble table, which is only part of the allocated buffer
+        // when plus_dim >= 5 (the buffer has 16 * ceil(dim / 4) entries). Lanes
+        // beyond dim contribute 0, matching the generic implementation, so the
+        // query is never read out of bounds and the table is never overrun.
+        const int low_count = plus_dim < 4 ? static_cast<int>(plus_dim) : 4;
+        const int high_count = plus_dim > 4 ? static_cast<int>(plus_dim) - 4 : 0;
+        const float* q_tail = query + 8 * num_bytes;
+        for (int byte_value = 0; byte_value < 16; ++byte_value) {
+            float low = 0.0F;
+            float high = 0.0F;
+            for (int bit_pos = 0; bit_pos < low_count; ++bit_pos) {
+                low += q_tail[bit_pos] * (((byte_value >> bit_pos) & 0x1) != 0 ? pos : neg);
+            }
+            for (int bit_pos = 0; bit_pos < high_count; ++bit_pos) {
+                high += q_tail[4 + bit_pos] * (((byte_value >> bit_pos) & 0x1) != 0 ? pos : neg);
+            }
+            table[byte_value] = static_cast<float16_t>(low);
+            if (high_count > 0) {
+                table[byte_value + 16] = static_cast<float16_t>(high);
+            }
+        }
+    }
+}
+
+inline void prefetch_L2(const void* address) {
+    __builtin_prefetch(address, 0, 2);
+}
+
+#define TBL_DOUBLE_LOOP(input_code0, input_code1, preload) \
+    c0 = svbext_n_u16(input_code0, 0x000F); \
+    c4 = svbext_n_u16(input_code1, 0x000F); \
+    c1 = svbext_n_u16(input_code0, 0x00F0); \
+    c5 = svbext_n_u16(input_code1, 0x00F0); \
+    c2 = svbext_n_u16(input_code0, 0x0F00); \
+    c6 = svbext_n_u16(input_code1, 0x0F00); \
+    c3 = svbext_n_u16(input_code0, 0xF000); \
+    c7 = svbext_n_u16(input_code1, 0xF000); \
+    asm volatile("tbl %[index].h, %[ftable0].h, %[index].h"     \
+    : [index] "+w"(c0) : [ftable0] "w"(table0):);               \
+    asm volatile("tbl %[index].h, %[ftable0].h, %[index].h"     \
+    : [index] "+w"(c4) : [ftable0] "w"(table0):);               \
+    if constexpr (preload) table0 = svld1_f16(all_true, sim_table);        \
+    asm volatile("tbl %[index].h, %[ftable1].h, %[index].h"     \
+    : [index] "+w"(c1) : [ftable1] "w"(table1):);               \
+    asm volatile("tbl %[index].h, %[ftable1].h, %[index].h"     \
+    : [index] "+w"(c5) : [ftable1] "w"(table1):);               \
+    if constexpr (preload) table1 = svld1_f16(all_true, sim_table + 16);   \
+    asm volatile("tbl %[index].h, %[ftable2].h, %[index].h"     \
+    : [index] "+w"(c2) : [ftable2] "w"(table2):);               \
+    asm volatile("tbl %[index].h, %[ftable2].h, %[index].h"     \
+    : [index] "+w"(c6) : [ftable2] "w"(table2):);               \
+    if constexpr (preload) table2 = svld1_f16(all_true, sim_table + 32);   \
+    asm volatile("tbl %[index].h, %[ftable3].h, %[index].h"     \
+    : [index] "+w"(c3) : [ftable3] "w"(table3):);               \
+    asm volatile("tbl %[index].h, %[ftable3].h, %[index].h"     \
+    : [index] "+w"(c7) : [ftable3] "w"(table3):);               \
+    if constexpr (preload) table3 = svld1_f16(all_true, sim_table + 48);   \
+    if constexpr (preload) sim_table += 64;                                \
+    res0 = svadd_f16_m(all_true, res0, svreinterpret_f16_u16(c0));   \
+    res4 = svadd_f16_m(all_true, res4, svreinterpret_f16_u16(c4));   \
+    res1 = svadd_f16_m(all_true, res1, svreinterpret_f16_u16(c1));   \
+    res5 = svadd_f16_m(all_true, res5, svreinterpret_f16_u16(c5));   \
+    res2 = svadd_f16_m(all_true, res2, svreinterpret_f16_u16(c2));   \
+    res6 = svadd_f16_m(all_true, res6, svreinterpret_f16_u16(c6));   \
+    res3 = svadd_f16_m(all_true, res3, svreinterpret_f16_u16(c3));   \
+    res7 = svadd_f16_m(all_true, res7, svreinterpret_f16_u16(c7));
+
+#define SVE_INNER_LOOP_DOUBLE_BODY(preload) \
+    c0 = svzip1_u16(rgba0, rgba1); \
+    c1 = svzip1_u16(rgba2, rgba3); \
+    c2 = svzip2_u16(rgba0, rgba1); \
+    c3 = svzip2_u16(rgba2, rgba3); \
+    c4 = svzip1_u16(rgba4, rgba5); \
+    c5 = svzip1_u16(rgba6, rgba7); \
+    c6 = svzip2_u16(rgba4, rgba5); \
+    c7 = svzip2_u16(rgba6, rgba7); \
+    rgba0 = svreinterpret_u16_u32(svzip1_u32(svreinterpret_u32_u16(c0), svreinterpret_u32_u16(c1))); \
+    rgba1 = svreinterpret_u16_u32(svzip2_u32(svreinterpret_u32_u16(c0), svreinterpret_u32_u16(c1))); \
+    rgba2 = svreinterpret_u16_u32(svzip1_u32(svreinterpret_u32_u16(c2), svreinterpret_u32_u16(c3))); \
+    rgba3 = svreinterpret_u16_u32(svzip2_u32(svreinterpret_u32_u16(c2), svreinterpret_u32_u16(c3))); \
+    rgba4 = svreinterpret_u16_u32(svzip1_u32(svreinterpret_u32_u16(c4), svreinterpret_u32_u16(c5))); \
+    rgba5 = svreinterpret_u16_u32(svzip2_u32(svreinterpret_u32_u16(c4), svreinterpret_u32_u16(c5))); \
+    rgba6 = svreinterpret_u16_u32(svzip1_u32(svreinterpret_u32_u16(c6), svreinterpret_u32_u16(c7))); \
+    rgba7 = svreinterpret_u16_u32(svzip2_u32(svreinterpret_u32_u16(c6), svreinterpret_u32_u16(c7))); \
+    TBL_DOUBLE_LOOP(rgba0, rgba4, true) \
+    if constexpr (preload) rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0  + m), svld1uh_u64(all_true, p2  + m), 16), svsli_n_u64(svld1uh_u64(all_true, p4  + m), svld1uh_u64(all_true, p6  + m), 16), 32)); \
+    if constexpr (preload) rgba4 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p16 + m), svld1uh_u64(all_true, p18 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p20 + m), svld1uh_u64(all_true, p22 + m), 16), 32)); \
+    TBL_DOUBLE_LOOP(rgba1, rgba5, true) \
+    if constexpr (preload) rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p8  + m), svld1uh_u64(all_true, p10 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p12 + m), svld1uh_u64(all_true, p14 + m), 16), 32)); \
+    if constexpr (preload) rgba5 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p24 + m), svld1uh_u64(all_true, p26 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p28 + m), svld1uh_u64(all_true, p30 + m), 16), 32)); \
+    TBL_DOUBLE_LOOP(rgba2, rgba6, true) \
+    if constexpr (preload) rgba2 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1  + m), svld1uh_u64(all_true, p3  + m), 16), svsli_n_u64(svld1uh_u64(all_true, p5  + m), svld1uh_u64(all_true, p7  + m), 16), 32)); \
+    if constexpr (preload) rgba6 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p17 + m), svld1uh_u64(all_true, p19 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p21 + m), svld1uh_u64(all_true, p23 + m), 16), 32)); \
+    TBL_DOUBLE_LOOP(rgba3, rgba7, preload)  \
+    if constexpr (preload) rgba3 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p9  + m), svld1uh_u64(all_true, p11 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p13 + m), svld1uh_u64(all_true, p15 + m), 16), 32)); \
+    if constexpr (preload) rgba7 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p25 + m), svld1uh_u64(all_true, p27 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p29 + m), svld1uh_u64(all_true, p31 + m), 16), 32));
+
+#define TBL_MAIN_LOOP(input_code0, preload) \
+    c0 = svbext_n_u16(input_code0, 0x000F); \
+    c1 = svbext_n_u16(input_code0, 0x00F0); \
+    c2 = svbext_n_u16(input_code0, 0x0F00); \
+    c3 = svbext_n_u16(input_code0, 0xF000); \
+    asm volatile("tbl %[index].h, %[ftable0].h, %[index].h"         \
+    : [index] "+w"(c0) : [ftable0] "w"(table0):);                   \
+    if constexpr (preload) table0 = svld1_f16(all_true, sim_table); \
+    asm volatile("tbl %[index].h, %[ftable1].h, %[index].h"         \
+    : [index] "+w"(c1) : [ftable1] "w"(table1):);                   \
+    if constexpr (preload) table1 = svld1_f16(all_true, sim_table + 16);   \
+    asm volatile("tbl %[index].h, %[ftable2].h, %[index].h"         \
+    : [index] "+w"(c2) : [ftable2] "w"(table2):);                   \
+    if constexpr (preload) table2 = svld1_f16(all_true, sim_table + 32);   \
+    asm volatile("tbl %[index].h, %[ftable3].h, %[index].h"         \
+    : [index] "+w"(c3) : [ftable3] "w"(table3):);                   \
+    if constexpr (preload) table3 = svld1_f16(all_true, sim_table + 48);   \
+    if constexpr (preload) sim_table += 64;                           \
+    res0 = svadd_f16_m(all_true, res0, svreinterpret_f16_u16(c0));  \
+    res1 = svadd_f16_m(all_true, res1, svreinterpret_f16_u16(c1));  \
+    res2 = svadd_f16_m(all_true, res2, svreinterpret_f16_u16(c2));  \
+    res3 = svadd_f16_m(all_true, res3, svreinterpret_f16_u16(c3));
+
+#define SVE_INNER_LOOP_BODY(preload) \
+    c0 = svzip1_u16(rgba0, rgba1); \
+    c1 = svzip1_u16(rgba2, rgba3); \
+    c2 = svzip2_u16(rgba0, rgba1); \
+    c3 = svzip2_u16(rgba2, rgba3); \
+    rgba0 = svreinterpret_u16_u32(svzip1_u32(svreinterpret_u32_u16(c0), svreinterpret_u32_u16(c1))); \
+    rgba1 = svreinterpret_u16_u32(svzip2_u32(svreinterpret_u32_u16(c0), svreinterpret_u32_u16(c1))); \
+    rgba2 = svreinterpret_u16_u32(svzip1_u32(svreinterpret_u32_u16(c2), svreinterpret_u32_u16(c3))); \
+    rgba3 = svreinterpret_u16_u32(svzip2_u32(svreinterpret_u32_u16(c2), svreinterpret_u32_u16(c3))); \
+    TBL_MAIN_LOOP(rgba0, true) \
+    if constexpr (preload) rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0  + m), svld1uh_u64(all_true, p2  + m), 16), svsli_n_u64(svld1uh_u64(all_true, p4  + m), svld1uh_u64(all_true, p6  + m), 16), 32)); \
+    TBL_MAIN_LOOP(rgba1, true) \
+    if constexpr (preload) rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p8  + m), svld1uh_u64(all_true, p10 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p12 + m), svld1uh_u64(all_true, p14 + m), 16), 32)); \
+    TBL_MAIN_LOOP(rgba2, true) \
+    if constexpr (preload) rgba2 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1  + m), svld1uh_u64(all_true, p3  + m), 16), svsli_n_u64(svld1uh_u64(all_true, p5  + m), svld1uh_u64(all_true, p7  + m), 16), 32)); \
+    TBL_MAIN_LOOP(rgba3, preload)  \
+    if constexpr (preload) rgba3 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p9  + m), svld1uh_u64(all_true, p11 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p13 + m), svld1uh_u64(all_true, p15 + m), 16), 32));
+
+#define SVE_HALF_INNER_LOOP_BODY(preload) \
+    c0 = svzip1_u16(rgba0, rgba1);  \
+    c2 = svzip2_u16(rgba0, rgba1);  \
+    rgba0 = svzip1_u16(c0, zeros);  \
+    rgba1 = svzip2_u16(c0, zeros);  \
+    rgba2 = svzip1_u16(c2, zeros);  \
+    rgba3 = svzip2_u16(c2, zeros);  \
+    TBL_MAIN_LOOP(rgba0, true) \
+    if constexpr (preload) rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0 + m), svld1uh_u64(all_true, p2 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p4 + m), svld1uh_u64(all_true, p6 + m), 16), 32)); \
+    TBL_MAIN_LOOP(rgba1, true)      \
+    if constexpr (preload) rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1 + m), svld1uh_u64(all_true, p3 + m), 16), svsli_n_u64(svld1uh_u64(all_true, p5 + m), svld1uh_u64(all_true, p7 + m), 16), 32)); \
+    TBL_MAIN_LOOP(rgba2, true)      \
+    TBL_MAIN_LOOP(rgba3, preload)
+
+#define L2_PREFETCH_OFFSET 28
+#define PREFETCH_STEP 12
+
+void
+RaBitQFloatBatchBinaryIPBy4BitLookup(const uint8_t* codes, uint64_t ncode, uint64_t dim,
+                                      uint64_t code_stride, const float16_t* table, float* out,
+                                      const uint32_t* idx) {
+    // This routine is a 256-bit SVE port of the FAISS PQFastScan layout: the
+    // TBL lookups, the packed code loads (svsli shifts 16/32) and the result
+    // stores (out / out + 8 / out + 16 / out + 24) all assume svcntw() == 8.
+    // On any other vector length the stores would write out of bounds and the
+    // arithmetic would be wrong, so fall back to the generic implementation.
+    // The main loops also walk the lookup table in fixed 256-entry (64-dim)
+    // blocks and only consume the table exactly when dim is a multiple of
+    // 64; for other dims they would read past the table allocation, so use
+    // the generic implementation (which pairs with the generic table
+    // layout) in that case as well.
+    if (svcntw() != 8 || (dim & 63) != 0) {
+        generic::RaBitQFloatBatchBinaryIPBy4BitLookup(
+            codes, ncode, dim, code_stride, table, out, idx);
+        return;
+    }
+    svbool_t all_true = svptrue_b16();
+    svbool_t all_true32 = svptrue_b32();
+    uint64_t nsq = (dim / 16);
+    uint64_t nc = 0;
+    svfloat16_t table0, table1, table2, table3;
+    svfloat16_t res0, res1, res2, res3;
+    svfloat16_t res4, res5, res6, res7;
+    for (; nc + 31 < ncode; nc += 32) {
+        {
+            svuint16_t c0, c1, c2, c3;
+            svuint16_t c4, c5, c6, c7;
+            const float16_t* sim_table = (float16_t*)table;
+            table0 = svld1_f16(all_true, sim_table);
+            table1 = svld1_f16(all_true, sim_table + 16);
+            table2 = svld1_f16(all_true, sim_table + 32);
+            table3 = svld1_f16(all_true, sim_table + 48);
+            sim_table += 64;
+            res0 = svdup_n_f16(0);
+            res1 = svdup_n_f16(0);
+            res2 = svdup_n_f16(0);
+            res3 = svdup_n_f16(0);
+            res4 = svdup_n_f16(0);
+            res5 = svdup_n_f16(0);
+            res6 = svdup_n_f16(0);
+            res7 = svdup_n_f16(0);
+
+            const uint16_t *p0  = (const uint16_t*)(codes + (uint64_t)idx[nc + 0 ] * code_stride);
+            const uint16_t *p1  = (const uint16_t*)(codes + (uint64_t)idx[nc + 1 ] * code_stride);
+            const uint16_t *p2  = (const uint16_t*)(codes + (uint64_t)idx[nc + 2 ] * code_stride);
+            const uint16_t *p3  = (const uint16_t*)(codes + (uint64_t)idx[nc + 3 ] * code_stride);
+            const uint16_t *p4  = (const uint16_t*)(codes + (uint64_t)idx[nc + 4 ] * code_stride);
+            const uint16_t *p5  = (const uint16_t*)(codes + (uint64_t)idx[nc + 5 ] * code_stride);
+            const uint16_t *p6  = (const uint16_t*)(codes + (uint64_t)idx[nc + 6 ] * code_stride);
+            const uint16_t *p7  = (const uint16_t*)(codes + (uint64_t)idx[nc + 7 ] * code_stride);
+            const uint16_t *p8  = (const uint16_t*)(codes + (uint64_t)idx[nc + 8 ] * code_stride);
+            const uint16_t *p9  = (const uint16_t*)(codes + (uint64_t)idx[nc + 9 ] * code_stride);
+            const uint16_t *p10 = (const uint16_t*)(codes + (uint64_t)idx[nc + 10] * code_stride);
+            const uint16_t *p11 = (const uint16_t*)(codes + (uint64_t)idx[nc + 11] * code_stride);
+            const uint16_t *p12 = (const uint16_t*)(codes + (uint64_t)idx[nc + 12] * code_stride);
+            const uint16_t *p13 = (const uint16_t*)(codes + (uint64_t)idx[nc + 13] * code_stride);
+            const uint16_t *p14 = (const uint16_t*)(codes + (uint64_t)idx[nc + 14] * code_stride);
+            const uint16_t *p15 = (const uint16_t*)(codes + (uint64_t)idx[nc + 15] * code_stride);
+            const uint16_t *p16 = (const uint16_t*)(codes + (uint64_t)idx[nc + 16] * code_stride);
+            const uint16_t *p17 = (const uint16_t*)(codes + (uint64_t)idx[nc + 17] * code_stride);
+            const uint16_t *p18 = (const uint16_t*)(codes + (uint64_t)idx[nc + 18] * code_stride);
+            const uint16_t *p19 = (const uint16_t*)(codes + (uint64_t)idx[nc + 19] * code_stride);
+            const uint16_t *p20 = (const uint16_t*)(codes + (uint64_t)idx[nc + 20] * code_stride);
+            const uint16_t *p21 = (const uint16_t*)(codes + (uint64_t)idx[nc + 21] * code_stride);
+            const uint16_t *p22 = (const uint16_t*)(codes + (uint64_t)idx[nc + 22] * code_stride);
+            const uint16_t *p23 = (const uint16_t*)(codes + (uint64_t)idx[nc + 23] * code_stride);
+            const uint16_t *p24 = (const uint16_t*)(codes + (uint64_t)idx[nc + 24] * code_stride);
+            const uint16_t *p25 = (const uint16_t*)(codes + (uint64_t)idx[nc + 25] * code_stride);
+            const uint16_t *p26 = (const uint16_t*)(codes + (uint64_t)idx[nc + 26] * code_stride);
+            const uint16_t *p27 = (const uint16_t*)(codes + (uint64_t)idx[nc + 27] * code_stride);
+            const uint16_t *p28 = (const uint16_t*)(codes + (uint64_t)idx[nc + 28] * code_stride);
+            const uint16_t *p29 = (const uint16_t*)(codes + (uint64_t)idx[nc + 29] * code_stride);
+            const uint16_t *p30 = (const uint16_t*)(codes + (uint64_t)idx[nc + 30] * code_stride);
+            const uint16_t *p31 = (const uint16_t*)(codes + (uint64_t)idx[nc + 31] * code_stride);
+
+            svuint16_t rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0 ), svld1uh_u64(all_true, p2 ), 16), svsli_n_u64(svld1uh_u64(all_true, p4 ), svld1uh_u64(all_true, p6 ), 16), 32));
+            svuint16_t rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p8 ), svld1uh_u64(all_true, p10), 16), svsli_n_u64(svld1uh_u64(all_true, p12), svld1uh_u64(all_true, p14), 16), 32));
+            svuint16_t rgba2 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1 ), svld1uh_u64(all_true, p3 ), 16), svsli_n_u64(svld1uh_u64(all_true, p5 ), svld1uh_u64(all_true, p7 ), 16), 32));
+            svuint16_t rgba3 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p9 ), svld1uh_u64(all_true, p11), 16), svsli_n_u64(svld1uh_u64(all_true, p13), svld1uh_u64(all_true, p15), 16), 32));
+            svuint16_t rgba4 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p16), svld1uh_u64(all_true, p18), 16), svsli_n_u64(svld1uh_u64(all_true, p20), svld1uh_u64(all_true, p22), 16), 32));
+            svuint16_t rgba5 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p24), svld1uh_u64(all_true, p26), 16), svsli_n_u64(svld1uh_u64(all_true, p28), svld1uh_u64(all_true, p30), 16), 32));
+            svuint16_t rgba6 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p17), svld1uh_u64(all_true, p19), 16), svsli_n_u64(svld1uh_u64(all_true, p21), svld1uh_u64(all_true, p23), 16), 32));
+            svuint16_t rgba7 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p25), svld1uh_u64(all_true, p27), 16), svsli_n_u64(svld1uh_u64(all_true, p29), svld1uh_u64(all_true, p31), 16), 32));
+            
+            uint64_t m = 4;
+            for (uint64_t x = 4; x + L2_PREFETCH_OFFSET < nsq; x += PREFETCH_STEP) {
+                prefetch_L2(p0  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p1  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p2  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p3  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p4  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p5  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p6  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p7  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p8  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p9  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p10 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p11 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p12 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p13 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p14 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p15 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p16 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p17 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p18 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p19 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p20 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p21 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p22 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p23 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p24 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p25 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p26 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p27 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p28 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p29 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p30 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p31 + (x + L2_PREFETCH_OFFSET));
+                for (m = x; m < x + PREFETCH_STEP; m += 4) {
+                    SVE_INNER_LOOP_DOUBLE_BODY(true)
+                }
+            }
+            for (; m < nsq; m += 4) {
+                SVE_INNER_LOOP_DOUBLE_BODY(true)
+            }
+            SVE_INNER_LOOP_DOUBLE_BODY(false)
+        }
+        svfloat32_t ans0 = svdup_n_f32(0);
+        svfloat32_t ans1 = svdup_n_f32(0);
+        svfloat32_t ans2 = svdup_n_f32(0);
+        svfloat32_t ans3 = svdup_n_f32(0);
+        ans0 = svmlalb_n_f32(ans0, res0, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res0, 1.0);
+        ans2 = svmlalb_n_f32(ans2, res4, 1.0);
+        ans3 = svmlalt_n_f32(ans3, res4, 1.0);
+        ans0 = svmlalb_n_f32(ans0, res1, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res1, 1.0);
+        ans2 = svmlalb_n_f32(ans2, res5, 1.0);
+        ans3 = svmlalt_n_f32(ans3, res5, 1.0);
+        ans0 = svmlalb_n_f32(ans0, res2, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res2, 1.0);
+        ans2 = svmlalb_n_f32(ans2, res6, 1.0);
+        ans3 = svmlalt_n_f32(ans3, res6, 1.0);
+        ans0 = svmlalb_n_f32(ans0, res3, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res3, 1.0);
+        ans2 = svmlalb_n_f32(ans2, res7, 1.0);
+        ans3 = svmlalt_n_f32(ans3, res7, 1.0);
+
+        svst1_f32(all_true32, out     , ans0);
+        svst1_f32(all_true32, out + 8 , ans1);
+        svst1_f32(all_true32, out + 16, ans2);
+        svst1_f32(all_true32, out + 24, ans3);
+        out += 32;
+    }
+    if (ncode & 16) {
+        svuint16_t c0, c1, c2, c3;
+        const float16_t* sim_table = (float16_t*)table;
+        table0 = svld1_f16(all_true, sim_table);
+        table1 = svld1_f16(all_true, sim_table + 16);
+        table2 = svld1_f16(all_true, sim_table + 32);
+        table3 = svld1_f16(all_true, sim_table + 48);
+        sim_table += 64;
+        res0 = svdup_n_f16(0);
+        res1 = svdup_n_f16(0);
+        res2 = svdup_n_f16(0);
+        res3 = svdup_n_f16(0);
+
+        svfloat32_t ans0 = svdup_n_f32(0);
+        svfloat32_t ans1 = svdup_n_f32(0);
+        const uint16_t *p0  = (const uint16_t*)(codes + (uint64_t)idx[nc + 0 ] * code_stride);
+        const uint16_t *p1  = (const uint16_t*)(codes + (uint64_t)idx[nc + 1 ] * code_stride);
+        const uint16_t *p2  = (const uint16_t*)(codes + (uint64_t)idx[nc + 2 ] * code_stride);
+        const uint16_t *p3  = (const uint16_t*)(codes + (uint64_t)idx[nc + 3 ] * code_stride);
+        const uint16_t *p4  = (const uint16_t*)(codes + (uint64_t)idx[nc + 4 ] * code_stride);
+        const uint16_t *p5  = (const uint16_t*)(codes + (uint64_t)idx[nc + 5 ] * code_stride);
+        const uint16_t *p6  = (const uint16_t*)(codes + (uint64_t)idx[nc + 6 ] * code_stride);
+        const uint16_t *p7  = (const uint16_t*)(codes + (uint64_t)idx[nc + 7 ] * code_stride);
+        const uint16_t *p8  = (const uint16_t*)(codes + (uint64_t)idx[nc + 8 ] * code_stride);
+        const uint16_t *p9  = (const uint16_t*)(codes + (uint64_t)idx[nc + 9 ] * code_stride);
+        const uint16_t *p10 = (const uint16_t*)(codes + (uint64_t)idx[nc + 10] * code_stride);
+        const uint16_t *p11 = (const uint16_t*)(codes + (uint64_t)idx[nc + 11] * code_stride);
+        const uint16_t *p12 = (const uint16_t*)(codes + (uint64_t)idx[nc + 12] * code_stride);
+        const uint16_t *p13 = (const uint16_t*)(codes + (uint64_t)idx[nc + 13] * code_stride);
+        const uint16_t *p14 = (const uint16_t*)(codes + (uint64_t)idx[nc + 14] * code_stride);
+        const uint16_t *p15 = (const uint16_t*)(codes + (uint64_t)idx[nc + 15] * code_stride);
+        svuint16_t rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0), svld1uh_u64(all_true, p2 ), 16), svsli_n_u64(svld1uh_u64(all_true, p4 ), svld1uh_u64(all_true, p6 ), 16), 32));
+        svuint16_t rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p8), svld1uh_u64(all_true, p10), 16), svsli_n_u64(svld1uh_u64(all_true, p12), svld1uh_u64(all_true, p14), 16), 32));
+        svuint16_t rgba2 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1), svld1uh_u64(all_true, p3 ), 16), svsli_n_u64(svld1uh_u64(all_true, p5 ), svld1uh_u64(all_true, p7 ), 16), 32));
+        svuint16_t rgba3 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p9), svld1uh_u64(all_true, p11), 16), svsli_n_u64(svld1uh_u64(all_true, p13), svld1uh_u64(all_true, p15), 16), 32));
+        uint64_t m = 4;
+        for (uint64_t x = 4; x + L2_PREFETCH_OFFSET < nsq; x += PREFETCH_STEP) {
+            prefetch_L2(p0  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p1  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p2  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p3  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p4  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p5  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p6  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p7  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p8  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p9  + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p10 + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p11 + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p12 + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p13 + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p14 + (x + L2_PREFETCH_OFFSET));
+            prefetch_L2(p15 + (x + L2_PREFETCH_OFFSET));
+            for (m = x; m < x + PREFETCH_STEP; m += 4) {
+                SVE_INNER_LOOP_BODY(true)
+            }
+        }
+        for (; m < nsq; m += 4) {
+            SVE_INNER_LOOP_BODY(true)
+        }
+        SVE_INNER_LOOP_BODY(false)
+
+        ans0 = svmlalb_n_f32(ans0, res0, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res0, 1.0);
+        ans0 = svmlalb_n_f32(ans0, res1, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res1, 1.0);
+        ans0 = svmlalb_n_f32(ans0, res2, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res2, 1.0);
+        ans0 = svmlalb_n_f32(ans0, res3, 1.0);
+        ans1 = svmlalt_n_f32(ans1, res3, 1.0);
+
+        svst1_f32(all_true32, out     , ans0);
+        svst1_f32(all_true32, out + 8 , ans1);
+        out += 16;
+        nc += 16;
+    }
+    if (nc < ncode) {
+        svuint16_t c0, c1, c2, c3;
+        uint64_t remaining = ncode - nc;
+        if (remaining > 8) {
+            svbool_t pred_hi = svwhilelt_b32(8, (int32_t)remaining);
+            const float16_t* sim_table = (float16_t*)table;
+            table0 = svld1_f16(all_true, sim_table);
+            table1 = svld1_f16(all_true, sim_table + 16);
+            table2 = svld1_f16(all_true, sim_table + 32);
+            table3 = svld1_f16(all_true, sim_table + 48);
+            sim_table += 64;
+            res0 = svdup_n_f16(0);
+            res1 = svdup_n_f16(0);
+            res2 = svdup_n_f16(0);
+            res3 = svdup_n_f16(0);
+            svfloat32_t ans0 = svdup_n_f32(0);
+            svfloat32_t ans1 = svdup_n_f32(0);
+            const uint16_t *p0  = (const uint16_t*)(codes + (uint64_t)idx[nc + 0]  * code_stride);
+            const uint16_t *p1  = (const uint16_t*)(codes + (uint64_t)idx[nc + 1]  * code_stride);
+            const uint16_t *p2  = (const uint16_t*)(codes + (uint64_t)idx[nc + 2]  * code_stride);
+            const uint16_t *p3  = (const uint16_t*)(codes + (uint64_t)idx[nc + 3]  * code_stride);
+            const uint16_t *p4  = (const uint16_t*)(codes + (uint64_t)idx[nc + 4]  * code_stride);
+            const uint16_t *p5  = (const uint16_t*)(codes + (uint64_t)idx[nc + 5]  * code_stride);
+            const uint16_t *p6  = (const uint16_t*)(codes + (uint64_t)idx[nc + 6]  * code_stride);
+            const uint16_t *p7  = (const uint16_t*)(codes + (uint64_t)idx[nc + 7]  * code_stride);
+    #define TAIL_PTR(k) ((k) < remaining ? idx[nc + (k)] : idx[0])
+            const uint16_t *p8  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(8)  * code_stride);
+            const uint16_t *p9  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(9)  * code_stride);
+            const uint16_t *p10 = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(10) * code_stride);
+            const uint16_t *p11 = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(11) * code_stride);
+            const uint16_t *p12 = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(12) * code_stride);
+            const uint16_t *p13 = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(13) * code_stride);
+            const uint16_t *p14 = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(14) * code_stride);
+            const uint16_t *p15 = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(15) * code_stride);
+    #undef TAIL_PTR
+            svuint16_t rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0), svld1uh_u64(all_true, p2 ), 16), svsli_n_u64(svld1uh_u64(all_true, p4 ), svld1uh_u64(all_true, p6 ), 16), 32));
+            svuint16_t rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p8), svld1uh_u64(all_true, p10), 16), svsli_n_u64(svld1uh_u64(all_true, p12), svld1uh_u64(all_true, p14), 16), 32));
+            svuint16_t rgba2 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1), svld1uh_u64(all_true, p3 ), 16), svsli_n_u64(svld1uh_u64(all_true, p5 ), svld1uh_u64(all_true, p7 ), 16), 32));
+            svuint16_t rgba3 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p9), svld1uh_u64(all_true, p11), 16), svsli_n_u64(svld1uh_u64(all_true, p13), svld1uh_u64(all_true, p15), 16), 32));
+            uint64_t m = 4;
+            for (uint64_t x = 4; x + L2_PREFETCH_OFFSET < nsq; x += PREFETCH_STEP) {
+                prefetch_L2(p0  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p1  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p2  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p3  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p4  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p5  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p6  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p7  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p8  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p9  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p10 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p11 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p12 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p13 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p14 + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p15 + (x + L2_PREFETCH_OFFSET));
+                for (m = x; m < x + PREFETCH_STEP; m += 4) {
+                    SVE_INNER_LOOP_BODY(true)
+                }
+            }
+            for (; m < nsq; m += 4) {
+                SVE_INNER_LOOP_BODY(true)
+            }
+            SVE_INNER_LOOP_BODY(false)
+
+            ans0 = svmlalb_n_f32(ans0, res0, 1.0);
+            ans1 = svmlalt_n_f32(ans1, res0, 1.0);
+            ans0 = svmlalb_n_f32(ans0, res1, 1.0);
+            ans1 = svmlalt_n_f32(ans1, res1, 1.0);
+            ans0 = svmlalb_n_f32(ans0, res2, 1.0);
+            ans1 = svmlalt_n_f32(ans1, res2, 1.0);
+            ans0 = svmlalb_n_f32(ans0, res3, 1.0);
+            ans1 = svmlalt_n_f32(ans1, res3, 1.0);
+
+            svst1_f32(all_true, out, ans0);
+            svst1_f32(pred_hi, out + 8, ans1);
+        } else {
+            svuint16_t zeros = svdup_n_u16(0);
+            svbool_t pred_lo = svwhilelt_b32(0, (int32_t)remaining);
+            const float16_t* sim_table = (float16_t*)table;
+            table0 = svld1_f16(all_true, sim_table);
+            table1 = svld1_f16(all_true, sim_table + 16);
+            table2 = svld1_f16(all_true, sim_table + 32);
+            table3 = svld1_f16(all_true, sim_table + 48);
+            sim_table += 64;
+            res0 = svdup_n_f16(0);
+            res1 = svdup_n_f16(0);
+            res2 = svdup_n_f16(0);
+            res3 = svdup_n_f16(0);
+            svfloat32_t ans0 = svdup_n_f32(0);
+            svfloat32_t ans1 = svdup_n_f32(0);
+    #define TAIL_PTR(k) ((k) < remaining ? idx[nc + (k)] : idx[0])
+            const uint16_t *p0  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(0)  * code_stride);
+            const uint16_t *p1  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(1)  * code_stride);
+            const uint16_t *p2  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(2)  * code_stride);
+            const uint16_t *p3  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(3)  * code_stride);
+            const uint16_t *p4  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(4)  * code_stride);
+            const uint16_t *p5  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(5)  * code_stride);
+            const uint16_t *p6  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(6)  * code_stride);
+            const uint16_t *p7  = (const uint16_t*)(codes + (uint64_t)TAIL_PTR(7)  * code_stride);
+    #undef TAIL_PTR
+            svuint16_t rgba0 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p0), svld1uh_u64(all_true, p2), 16), svsli_n_u64(svld1uh_u64(all_true, p4), svld1uh_u64(all_true, p6), 16), 32));
+            svuint16_t rgba1 = svreinterpret_u16_u64(svsli_n_u64(svsli_n_u64(svld1uh_u64(all_true, p1), svld1uh_u64(all_true, p3), 16), svsli_n_u64(svld1uh_u64(all_true, p5), svld1uh_u64(all_true, p7), 16), 32));
+            svuint16_t rgba2, rgba3;
+            uint64_t m = 4;
+            for (uint64_t x = 4; x + L2_PREFETCH_OFFSET < nsq; x += PREFETCH_STEP) {
+                prefetch_L2(p0  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p1  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p2  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p3  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p4  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p5  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p6  + (x + L2_PREFETCH_OFFSET));
+                prefetch_L2(p7  + (x + L2_PREFETCH_OFFSET));
+                for (m = x; m < x + PREFETCH_STEP; m += 4) {
+                    SVE_HALF_INNER_LOOP_BODY(true)
+                }
+            }
+            for (; m < nsq; m += 4) {
+                SVE_HALF_INNER_LOOP_BODY(true)
+            }
+            SVE_HALF_INNER_LOOP_BODY(false)
+
+            ans0 = svmlalb_n_f32(ans0, res0, 1.0);
+            ans1 = svmlalb_n_f32(ans1, res1, 1.0);
+            ans0 = svmlalb_n_f32(ans0, res2, 1.0);
+            ans1 = svmlalb_n_f32(ans1, res3, 1.0);
+            ans0 = svadd_f32_m(pred_lo, ans0, ans1);
+
+            svst1_f32(pred_lo, out, ans0);
+        }
+    }
+}
+
+#else
+
+void
+RaBitQFloatBuild4BitLookupTable(const float* query,
+                                uint64_t dim,
+                                float inv_sqrt_d,
+                                float16_t* table) {
+    generic::RaBitQFloatBuild4BitLookupTable(query, dim, inv_sqrt_d, table);
+}
+
+void
+RaBitQFloatBatchBinaryIPBy4BitLookup(const uint8_t* codes,
+                                     uint64_t ncode,
+                                     uint64_t dim,
+                                     uint64_t code_stride,
+                                     const float16_t* table,
+                                     float* out,
+                                     const uint32_t* idx) {
+    generic::RaBitQFloatBatchBinaryIPBy4BitLookup(codes, ncode, dim, code_stride, table, out, idx);
+}
+
+#endif  // ENABLE_SVE
+
+void
+BuildBinaryQueryLookupTable(const float* vector, uint64_t dim, float inv_sqrt_d, float* lookup) {
+#if defined(ENABLE_SVE)
+    // The vectorised path below requires a 256-bit SVE vector (svcntw() == 8): it
+    // performs whole-vector loads/stores on the 8- and 16-element stack buffers and
+    // assumes every svst1_f32 writes exactly 8 table entries. On other vector
+    // lengths it would read past `pattern`, leave table entries unwritten or write
+    // past `tmp_pattern`, so fall back to the portable implementation there.
+    if (svcntw() == 8) {
+        const float pos = inv_sqrt_d < 1e-3F ? 1.0F : inv_sqrt_d;
+        const float neg = inv_sqrt_d < 1e-3F ? 0.0F : -inv_sqrt_d;
+        const float pattern[8] = {neg, neg, neg, neg, pos, pos, pos, pos};
+        svbool_t all_true = svptrue_b32();
+        svfloat32_t inv_sqrt_d1 = svdupq_n_f32(neg, pos, neg, pos);
+        svfloat32_t inv_sqrt_d2 = svdupq_n_f32(neg, neg, pos, pos);
+        svfloat32_t inv_sqrt_d3 = svld1_f32(all_true, pattern);
+        const uint64_t num_bytes = dim / 8;
+        const uint64_t plus_dim = dim & 7;
+        float tmp_pattern[16];
+        for (uint64_t nb = 0; nb < num_bytes; ++nb) {
+            const float* q = vector + 8 * nb;
+            svfloat32_t dim_lowhalf = svdup_n_f32(0);
+            svfloat32_t dim_highhalf = svdup_n_f32(0);
+            dim_lowhalf = svmla_n_f32_m(all_true, dim_lowhalf, inv_sqrt_d1, q[0]);
+            dim_highhalf = svmla_n_f32_m(all_true, dim_highhalf, inv_sqrt_d1, q[4]);
+            dim_lowhalf = svmla_n_f32_m(all_true, dim_lowhalf, inv_sqrt_d2, q[1]);
+            dim_highhalf = svmla_n_f32_m(all_true, dim_highhalf, inv_sqrt_d2, q[5]);
+            dim_lowhalf = svmla_n_f32_m(all_true, dim_lowhalf, inv_sqrt_d3, q[2]);
+            dim_highhalf = svmla_n_f32_m(all_true, dim_highhalf, inv_sqrt_d3, q[6]);
+
+            svfloat32_t dim_lowhalf_low = svadd_n_f32_m(all_true, dim_lowhalf, q[3] * neg);
+            svfloat32_t dim_lowhalf_high = svadd_n_f32_m(all_true, dim_lowhalf, q[3] * pos);
+            svfloat32_t dim_highhalf_low = svadd_n_f32_m(all_true, dim_highhalf, q[7] * neg);
+            svfloat32_t dim_highhalf_high = svadd_n_f32_m(all_true, dim_highhalf, q[7] * pos);
+
+            svst1_f32(all_true, tmp_pattern, dim_highhalf_low);
+            svst1_f32(all_true, tmp_pattern + 8, dim_highhalf_high);
+            for (int i = 0; i < 16; ++i) {
+                const svfloat32_t dim_low_half =
+                    svadd_n_f32_m(all_true, dim_lowhalf_low, tmp_pattern[i]);
+                const svfloat32_t dim_high_half =
+                    svadd_n_f32_m(all_true, dim_lowhalf_high, tmp_pattern[i]);
+                svst1_f32(all_true, lookup + i * 16, dim_low_half);
+                svst1_f32(all_true, lookup + i * 16 + 8, dim_high_half);
+            }
+            lookup += 256;
+        }
+        if (plus_dim != 0) {
+            const float inv_sqrt_d_list[2] = {neg, pos};
+            for (int byte_value = 0; byte_value < 256; ++byte_value) {
+                lookup[byte_value] = 0;
+                for (uint64_t bit_pos = 0; bit_pos < plus_dim; ++bit_pos) {
+                    lookup[byte_value] += vector[8 * num_bytes + bit_pos] *
+                                          inv_sqrt_d_list[(byte_value >> bit_pos) & 0x1];
+                }
+            }
+        }
+        return;
+    }
+#endif
+    const uint64_t plane_bytes = (dim + 7) / 8;
+    const float pos = inv_sqrt_d < 1e-3F ? 1.0F : inv_sqrt_d;
+    const float neg = inv_sqrt_d < 1e-3F ? 0.0F : -inv_sqrt_d;
+    const float delta = pos - neg;
+
+    for (uint64_t block = 0; block < plane_bytes; ++block) {
+        float lane_values[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+        float base_sum = 0.0F;
+        const uint64_t dim_base = block * 8;
+        for (uint64_t lane = 0; lane < 8; ++lane) {
+            const uint64_t dim_id = dim_base + lane;
+            if (dim_id < dim) {
+                lane_values[lane] = vector[dim_id];
+                base_sum += lane_values[lane];
+            }
+        }
+
+        auto* block_lookup = lookup + (block << 8);
+        block_lookup[0] = neg * base_sum;
+        for (uint32_t mask = 1; mask < 256; ++mask) {
+            const uint32_t low_bit = mask & (~mask + 1U);
+            const uint32_t lane = static_cast<uint32_t>(__builtin_ctz(low_bit));
+            block_lookup[mask] = block_lookup[mask ^ low_bit] + delta * lane_values[lane];
+        }
+    }
 }
 
 }  // namespace vsag::sve

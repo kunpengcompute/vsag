@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -14,11 +30,56 @@
 // limitations under the License.
 
 #include "simd.h"
+
+#include <cmath>
+#include <cstring>
+
+#ifdef __aarch64__
+#include <arm_neon.h>
+#endif
+
 #include "simd/int8_simd.h"
 #include "simd/kernels/kernels.h"
 #include "simd/traits/simd_traits_generic.h"
 
 namespace vsag::generic {
+
+namespace {
+
+float
+BinaryIPFromLookupLocal(const float* lookup, const uint8_t* bits, uint64_t dim) {
+    const uint64_t plane_bytes = (dim + 7) / 8;
+    float result = 0.0F;
+    for (uint64_t block = 0; block < plane_bytes; ++block) {
+        result += lookup[(block << 8) + bits[block]];
+    }
+    return result;
+}
+
+void
+BinaryIPBatch4FromLookupLocal(const float* lookup,
+                              const uint8_t* bits1,
+                              const uint8_t* bits2,
+                              const uint8_t* bits3,
+                              const uint8_t* bits4,
+                              uint64_t dim,
+                              float* results) {
+    results[0] = 0.0F;
+    results[1] = 0.0F;
+    results[2] = 0.0F;
+    results[3] = 0.0F;
+
+    const uint64_t plane_bytes = (dim + 7) / 8;
+    for (uint64_t block = 0; block < plane_bytes; ++block) {
+        const auto* block_lookup = lookup + (block << 8);
+        results[0] += block_lookup[bits1[block]];
+        results[1] += block_lookup[bits2[block]];
+        results[2] += block_lookup[bits3[block]];
+        results[3] += block_lookup[bits4[block]];
+    }
+}
+
+}  // namespace
 
 float
 L2Sqr(const void* pVect1v, const void* pVect2v, const void* qty_ptr) {
@@ -445,6 +506,10 @@ SQ8UniformComputeCodesIPBatch(const uint8_t* RESTRICT query,
 
 float
 RaBitQFloatBinaryIP(const float* vector, const uint8_t* bits, uint64_t dim, float inv_sqrt_d) {
+    if (std::isnan(inv_sqrt_d)) {
+        return BinaryIPFromLookupLocal(vector, bits, dim);
+    }
+
     if (dim == 0) {
         return 0.0f;
     }
@@ -478,6 +543,11 @@ RaBitQFloatBinaryIPBatch4(const float* vector,
                           uint64_t dim,
                           float inv_sqrt_d,
                           float* results) {
+    if (std::isnan(inv_sqrt_d)) {
+        BinaryIPBatch4FromLookupLocal(vector, bits1, bits2, bits3, bits4, dim, results);
+        return;
+    }
+
     results[0] = 0.0F;
     results[1] = 0.0F;
     results[2] = 0.0F;
@@ -961,6 +1031,135 @@ FHTRotate(float* data, uint64_t dim_) {
     while (step < n) {
         generic::RotateOp(data, 0, dim_, step);
         step *= 2;
+    }
+}
+
+void
+RaBitQFloatBuild4BitLookupTable(const float* query,
+                                uint64_t dim,
+                                float inv_sqrt_d,
+                                float16_t* table) {
+    const uint64_t num_groups = (dim + 3) / 4;
+    float pos = inv_sqrt_d;
+    float neg = -inv_sqrt_d;
+    if (inv_sqrt_d < 1e-3F) {
+        pos = 1.0F;
+        neg = 0.0F;
+    }
+    for (uint64_t g = 0; g < num_groups; ++g) {
+        float lane[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+        for (uint64_t k = 0; k < 4; ++k) {
+            const uint64_t d = g * 4 + k;
+            if (d < dim) {
+                lane[k] = query[d];
+            }
+        }
+
+        float vals[16];
+        vals[0] = neg * (lane[0] + lane[1] + lane[2] + lane[3]);
+        const float delta = pos - neg;
+        for (uint32_t m = 1; m < 16; ++m) {
+            const uint32_t lo = m & (~m + 1U);
+            const uint32_t bit = static_cast<uint32_t>(__builtin_ctz(lo));
+            vals[m] = vals[m ^ lo] + delta * lane[bit];
+        }
+
+        auto* grp = table + g * 16;
+#ifdef __aarch64__
+        float32x4_t f0 = vld1q_f32(&vals[0]);
+        float32x4_t f1 = vld1q_f32(&vals[4]);
+        float32x4_t f2 = vld1q_f32(&vals[8]);
+        float32x4_t f3 = vld1q_f32(&vals[12]);
+        float16x4_t h0 = vcvt_f16_f32(f0);
+        float16x4_t h1 = vcvt_f16_f32(f1);
+        float16x4_t h2 = vcvt_f16_f32(f2);
+        float16x4_t h3 = vcvt_f16_f32(f3);
+        vst1q_f16(&grp[0], vcombine_f16(h0, h1));
+        vst1q_f16(&grp[8], vcombine_f16(h2, h3));
+#else
+        for (uint64_t p = 0; p < 16; ++p) {
+            uint32_t f32;
+            std::memcpy(&f32, &vals[p], sizeof(float));
+            const uint32_t sign = (f32 >> 16) & 0x8000;
+            int32_t exp = static_cast<int32_t>((f32 >> 23) & 0xFF) - 127;
+            uint32_t mant = (f32 >> 13) & 0x3FF;
+            if (exp > 15) {
+                exp = 15;
+                mant = 0x3FF;
+            } else if (exp < -14) {
+                exp = -14;
+                mant = 0;
+            }
+            grp[p] =
+                static_cast<float16_t>(sign | ((static_cast<uint32_t>(exp + 15) << 10) | mant));
+        }
+#endif
+    }
+}
+
+namespace {
+
+inline float
+float16_to_float(float16_t h) {
+#ifdef __aarch64__
+    return static_cast<float>(h);
+#else
+    uint32_t u = static_cast<uint32_t>(h);
+    const uint32_t sign = (u >> 15) & 1;
+    uint32_t exp = (u >> 10) & 0x1F;
+    uint32_t mant = u & 0x3FF;
+    uint32_t f32;
+    if (exp == 0) {
+        if (mant == 0) {
+            f32 = sign << 31;
+        } else {
+            exp = 113;
+            while ((mant & 0x200) == 0) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x1FF;
+            f32 = (sign << 31) | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
+    } else {
+        f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
+    }
+    float result;
+    std::memcpy(&result, &f32, sizeof(float));
+    return result;
+#endif
+}
+
+}  // namespace
+
+void
+RaBitQFloatBatchBinaryIPBy4BitLookup(const uint8_t* codes,
+                                     uint64_t ncode,
+                                     uint64_t dim,
+                                     uint64_t code_stride,
+                                     const float16_t* table,
+                                     float* out,
+                                     const uint32_t* idx) {
+    const uint64_t packed_bytes = (dim + 7) / 8;
+    const uint64_t num_groups = (dim + 3) / 4;
+    for (uint64_t i = 0; i < ncode; ++i) {
+        out[i] = 0.0F;
+    }
+    for (uint64_t b = 0; b < packed_bytes; ++b) {
+        const uint64_t g_lo = b * 2;
+        const uint64_t g_hi = g_lo + 1;
+        const auto* tbl_lo = table + g_lo * 16;
+        const auto* tbl_hi = g_hi < num_groups ? table + g_hi * 16 : nullptr;
+        for (uint64_t i = 0; i < ncode; ++i) {
+            const auto* code = codes + static_cast<uint64_t>(idx[i]) * code_stride;
+            const uint8_t byte_val = code[b];
+            out[i] += float16_to_float(tbl_lo[byte_val & 0x0F]);
+            if (tbl_hi != nullptr) {
+                out[i] += float16_to_float(tbl_hi[(byte_val >> 4) & 0x0F]);
+            }
+        }
     }
 }
 

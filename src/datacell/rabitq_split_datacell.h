@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -100,6 +116,24 @@ public:
     void
     MultiRead(uint8_t* dst, uint64_t* sizes, uint64_t* offsets, uint64_t count) const {
         io_->MultiRead(dst, sizes, offsets, count);
+    }
+
+    void
+    PermuteEntries(const Vector<InnerIdType>& perm, uint64_t total_count, Allocator* allocator) {
+        if (code_size_ == 0 || total_count == 0) {
+            return;
+        }
+        if (perm.size() < total_count) {
+            throw VsagException(ErrorType::INTERNAL_ERROR,
+                                "rabitq split perm size is smaller than total count");
+        }
+
+        ByteBuffer new_codes(total_count * code_size_, allocator);
+        for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+            auto* dst = new_codes.data + static_cast<uint64_t>(new_id) * code_size_;
+            this->Read(perm[new_id], dst);
+        }
+        io_->Write(new_codes.data, total_count * code_size_, 0);
     }
 
     void
@@ -646,6 +680,13 @@ public:
         this->supplement_cell_->Read(from, supplement.data);
         this->x_bit_cell_->Write(one_bit.data, to);
         this->supplement_cell_->Write(supplement.data, to);
+    }
+
+    void
+    PermuteEntries(const Vector<InnerIdType>& perm) override {
+        const uint64_t total_count = this->total_count_;
+        this->x_bit_cell_->PermuteEntries(perm, total_count, allocator_);
+        this->supplement_cell_->PermuteEntries(perm, total_count, allocator_);
     }
 
     void

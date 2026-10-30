@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -15,6 +31,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -135,6 +152,9 @@ public:
 
     void
     Move(InnerIdType from, InnerIdType to) override;
+
+    void
+    PermuteEntries(const Vector<InnerIdType>& perm, const Vector<InnerIdType>& imap) override;
 
     void
     ShrinkToFit(InnerIdType capacity) override {
@@ -431,6 +451,80 @@ GraphDataCell<IOTmpl>::Move(InnerIdType from, InnerIdType to) {
     if (is_support_delete_) {
         node_versions_[to] = node_versions_[from];
     }
+}
+
+template <typename IOTmpl>
+void
+GraphDataCell<IOTmpl>::PermuteEntries(const Vector<InnerIdType>& perm,
+                                      const Vector<InnerIdType>& imap) {
+    const uint64_t total_count = this->total_count_;
+    if (perm.size() < total_count || imap.size() < total_count) {
+        throw VsagException(ErrorType::INTERNAL_ERROR,
+                            "graph perm size is smaller than total count");
+    }
+    if (total_count == 0) {
+        return;
+    }
+
+    Vector<Vector<InnerIdType>> new_neighbors(allocator_);
+    new_neighbors.reserve(total_count);
+    Vector<InnerIdType> neighbors(allocator_);
+    for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+        this->GetNeighbors(perm[new_id], neighbors);
+        Vector<InnerIdType> mapped(allocator_);
+        mapped.reserve(neighbors.size());
+        for (const auto old_neighbor : neighbors) {
+            if (old_neighbor < imap.size()) {
+                mapped.emplace_back(imap[old_neighbor]);
+            }
+        }
+        std::sort(mapped.begin(), mapped.end());
+        new_neighbors.emplace_back(std::move(mapped));
+    }
+
+    Vector<uint8_t> new_versions(allocator_);
+    if (is_support_delete_) {
+        new_versions.resize(node_versions_.size());
+        for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+            new_versions[new_id] = node_versions_[perm[new_id]];
+        }
+        node_versions_.swap(new_versions);
+    }
+
+    for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+        const auto& mapped_neighbors = new_neighbors[new_id];
+        auto start = static_cast<uint64_t>(new_id) * static_cast<uint64_t>(this->code_line_size_);
+        uint32_t neighbor_count =
+            std::min(static_cast<uint32_t>(mapped_neighbors.size()), this->maximum_degree_);
+        this->io_->Write(reinterpret_cast<const uint8_t*>(&neighbor_count),
+                         sizeof(neighbor_count),
+                         start);
+        start += sizeof(neighbor_count);
+        if (is_support_delete_) {
+            Vector<InnerIdType> neighbor_ids_ptr(mapped_neighbors.size(), 0, this->allocator_);
+            for (uint32_t i = 0; i < neighbor_count; ++i) {
+                auto neighbor_id = mapped_neighbors[i];
+                neighbor_ids_ptr[i] = neighbor_id | (node_versions_[neighbor_id] << id_bit_);
+            }
+            this->io_->Write(reinterpret_cast<const uint8_t*>(neighbor_ids_ptr.data()),
+                             static_cast<uint64_t>(neighbor_count) * sizeof(InnerIdType),
+                             start);
+        } else {
+            this->io_->Write(reinterpret_cast<const uint8_t*>(mapped_neighbors.data()),
+                             static_cast<uint64_t>(neighbor_count) * sizeof(InnerIdType),
+                             start);
+        }
+    }
+
+    if (reverse_edges_) {
+        reverse_edges_->Clear();
+        for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+            for (const auto neighbor : new_neighbors[new_id]) {
+                reverse_edges_->AddReverseEdge(new_id, neighbor);
+            }
+        }
+    }
+    this->total_count_ = static_cast<InnerIdType>(total_count);
 }
 
 }  // namespace vsag

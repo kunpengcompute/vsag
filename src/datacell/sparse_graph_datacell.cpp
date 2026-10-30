@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -334,6 +350,84 @@ SparseGraphDataCell::Move(InnerIdType from, InnerIdType to) {
 
     std::unique_lock<std::shared_mutex> wlock(this->neighbors_map_mutex_);
     this->neighbors_.erase(from);
+}
+
+void
+SparseGraphDataCell::PermuteEntries(const Vector<InnerIdType>& perm,
+                                    const Vector<InnerIdType>& imap) {
+    (void)perm;
+    UnorderedMap<InnerIdType, std::unique_ptr<Vector<InnerIdType>>> new_neighbors(allocator_);
+    UnorderedMap<InnerIdType, uint8_t> new_node_version(allocator_);
+    Vector<Vector<InnerIdType>> plain_neighbors(this->total_count_, Vector<InnerIdType>(allocator_),
+                                                allocator_);
+
+    Vector<InnerIdType> neighbors(allocator_);
+    {
+        std::unique_lock<std::shared_mutex> wlock(this->neighbors_map_mutex_);
+        if (is_support_delete_) {
+            for (const auto& item : this->node_version_) {
+                const auto old_id = item.first;
+                if (old_id < imap.size()) {
+                    new_node_version[imap[old_id]] = item.second;
+                }
+            }
+        }
+
+        for (const auto& item : this->neighbors_) {
+            const auto old_id = item.first;
+            if (old_id >= imap.size()) {
+                continue;
+            }
+            neighbors.clear();
+            const auto& old_neighbors = *(item.second);
+            if (is_support_delete_) {
+                for (const auto packed_neighbor : old_neighbors) {
+                    const auto old_neighbor = packed_neighbor & remove_flag_mask_;
+                    if (old_neighbor < imap.size()) {
+                        neighbors.emplace_back(imap[old_neighbor]);
+                    }
+                }
+            } else {
+                for (const auto old_neighbor : old_neighbors) {
+                    if (old_neighbor < imap.size()) {
+                        neighbors.emplace_back(imap[old_neighbor]);
+                    }
+                }
+            }
+            std::sort(neighbors.begin(), neighbors.end());
+            if (imap[old_id] < plain_neighbors.size()) {
+                plain_neighbors[imap[old_id]] = neighbors;
+            }
+
+            auto mapped = std::make_unique<Vector<InnerIdType>>(allocator_);
+            mapped->reserve(neighbors.size());
+            if (is_support_delete_) {
+                for (const auto new_neighbor : neighbors) {
+                    auto version_iter = new_node_version.find(new_neighbor);
+                    const auto version =
+                        version_iter == new_node_version.end() ? 0 : version_iter->second;
+                    mapped->emplace_back(new_neighbor | (version << id_bit_));
+                }
+            } else {
+                mapped->assign(neighbors.begin(), neighbors.end());
+            }
+            new_neighbors.emplace(imap[old_id], std::move(mapped));
+        }
+        this->neighbors_.swap(new_neighbors);
+        if (is_support_delete_) {
+            this->node_version_.swap(new_node_version);
+        }
+        this->total_count_.store(static_cast<InnerIdType>(this->neighbors_.size()));
+    }
+
+    if (reverse_edges_) {
+        reverse_edges_->Clear();
+        for (InnerIdType id = 0; id < plain_neighbors.size(); ++id) {
+            for (const auto nb : plain_neighbors[id]) {
+                reverse_edges_->AddReverseEdge(id, nb);
+            }
+        }
+    }
 }
 
 }  // namespace vsag

@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 
 // Copyright 2024-present the vsag project
 //
@@ -120,6 +136,9 @@ public:
 
     void
     Move(InnerIdType from, InnerIdType to) override;
+
+    void
+    PermuteEntries(const Vector<InnerIdType>& perm) override;
 
     void
     ShrinkToFit(InnerIdType capacity) override {
@@ -351,6 +370,59 @@ FlattenDataCell<QuantTmpl, IOTmpl>::query(float* result_dists,
         }
     }
 
+    if constexpr (IOTmpl::InMemory) {
+        if (computer->quantizer_->GetBatchMode() == 1 and id_count > 0) {
+            uint64_t min_id = static_cast<uint64_t>(idx[0]);
+            uint64_t max_id = min_id;
+            for (InnerIdType k = 1; k < id_count; ++k) {
+                const uint64_t cur_id = static_cast<uint64_t>(idx[k]);
+                min_id = std::min(min_id, cur_id);
+                max_id = std::max(max_id, cur_id);
+            }
+
+            bool min_need_release = false;
+            bool max_need_release = false;
+            const auto* min_codes = this->GetCodesById(static_cast<InnerIdType>(min_id),
+                                                       min_need_release);
+            const auto* max_codes = this->GetCodesById(static_cast<InnerIdType>(max_id),
+                                                       max_need_release);
+            if (min_codes != nullptr and max_codes != nullptr and not min_need_release and
+                not max_need_release and
+                max_codes == min_codes +
+                                 (max_id - min_id) * static_cast<uint64_t>(this->code_size_)) {
+                Vector<uint32_t> batch_idx(id_count, search_alloc);
+                for (InnerIdType k = 0; k < id_count; ++k) {
+                    batch_idx[k] = static_cast<uint32_t>(static_cast<uint64_t>(idx[k]) - min_id);
+                }
+                computer->quantizer_->ComputeDistsBatchTransposedImpl(
+                    *computer, min_codes, batch_idx.data(), id_count, result_dists);
+                return;
+            }
+
+            if (min_need_release and min_codes != nullptr) {
+                this->io_->Release(min_codes);
+            }
+            if (max_need_release and max_codes != nullptr) {
+                this->io_->Release(max_codes);
+            }
+
+            ByteBuffer codes(static_cast<uint64_t>(id_count) * this->code_size_, search_alloc);
+            Vector<uint32_t> batch_idx(id_count, search_alloc);
+            bool all_read = true;
+            for (InnerIdType k = 0; k < id_count; ++k) {
+                batch_idx[k] = static_cast<uint32_t>(k);
+                all_read &= this->GetCodesById(idx[k],
+                                               codes.data + static_cast<uint64_t>(k) *
+                                                                 this->code_size_);
+            }
+            if (all_read) {
+                computer->quantizer_->ComputeDistsBatchTransposedImpl(
+                    *computer, codes.data, batch_idx.data(), id_count, result_dists);
+                return;
+            }
+        }
+    }
+
     memset(result_dists, 0, sizeof(float) * id_count);
     int64_t i = 0;
     for (; i + 3 < id_count; i += 4) {
@@ -522,6 +594,27 @@ FlattenDataCell<QuantTmpl, IOTmpl>::Move(InnerIdType from, InnerIdType to) {
     if (need_release) {
         this->io_->Release(codes);
     }
+}
+
+template <typename QuantTmpl, typename IOTmpl>
+void
+FlattenDataCell<QuantTmpl, IOTmpl>::PermuteEntries(const Vector<InnerIdType>& perm) {
+    const uint64_t total_count = this->total_count_;
+    if (perm.size() < total_count) {
+        throw VsagException(ErrorType::INTERNAL_ERROR,
+                            "flatten perm size is smaller than total count");
+    }
+    if (total_count == 0 || this->code_size_ == 0) {
+        return;
+    }
+
+    ByteBuffer new_codes(total_count * static_cast<uint64_t>(this->code_size_), allocator_);
+    for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+        const auto old_id = perm[new_id];
+        auto* dst = new_codes.data + static_cast<uint64_t>(new_id) * this->code_size_;
+        this->GetCodesById(old_id, dst);
+    }
+    this->io_->Write(new_codes.data, total_count * static_cast<uint64_t>(this->code_size_), 0);
 }
 
 }  // namespace vsag
