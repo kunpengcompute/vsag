@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -24,6 +39,7 @@
 
 #include "datacell/flatten_interface.h"
 #include "impl/heap/standard_heap.h"
+#include "impl/query_computer_pool.h"
 #include "utils/filter_search_skip_strategy.h"
 #include "utils/spsc_queue.h"
 
@@ -59,21 +75,41 @@ ParallelSearcher::visit(const GraphInterfacePtr& graph,
         }
     }
 
-    for (uint64_t i = 0; i < point_visited_num; i++) {
-        for (uint32_t j = 0; j < neighbors[i].size(); j++) {
-            if (j + prefetch_stride_visit_ < neighbors[i].size()) {
+    if (filter == nullptr) {
+        for (uint64_t i = 0; i < point_visited_num; ++i) {
+            const auto neighbor_count = static_cast<uint32_t>(neighbors[i].size());
+            for (uint32_t j = 0; j < neighbor_count; ++j) {
+                if (j + prefetch_stride_visit_ < neighbor_count) {
+                    vl->Prefetch(neighbors[i][j + prefetch_stride_visit_]);
+                }
+
+                const auto neighbor_id = neighbors[i][j];
+                if (vl->CheckAndSet(neighbor_id)) {
+                    to_be_visited_id[count_no_visited] = neighbor_id;
+                    ++count_no_visited;
+                }
+            }
+        }
+
+        return count_no_visited;
+    }
+
+    for (uint64_t i = 0; i < point_visited_num; ++i) {
+        const auto neighbor_count = static_cast<uint32_t>(neighbors[i].size());
+        for (uint32_t j = 0; j < neighbor_count; ++j) {
+            if (j + prefetch_stride_visit_ < neighbor_count) {
                 vl->Prefetch(neighbors[i][j + prefetch_stride_visit_]);
             }
-            if (not vl->Get(neighbors[i][j])) {
-                vl->Set(neighbors[i][j]);
-                // Removed filter->CheckValid() to eliminate duplicate filter checking.
-                // Filter is applied at result-collection stage.
-                // ShouldVisit() probabilistically gates traversal to preserve graph connectivity.
-                if (not filter || count_no_visited == 0 || skip_strategy == nullptr ||
-                    skip_strategy->ShouldVisit()) {
-                    to_be_visited_id[count_no_visited] = neighbors[i][j];
-                    count_no_visited++;
-                }
+
+            const auto neighbor_id = neighbors[i][j];
+            // Removed filter->CheckValid() to eliminate duplicate filter checking.
+            // Filter is applied at result-collection stage.
+            // ShouldVisit() probabilistically gates traversal to preserve graph connectivity.
+            if (vl->CheckAndSet(neighbor_id) and
+                (count_no_visited == 0 || skip_strategy == nullptr ||
+                 skip_strategy->ShouldVisit())) {
+                to_be_visited_id[count_no_visited] = neighbor_id;
+                ++count_no_visited;
             }
         }
     }
@@ -129,7 +165,8 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
         return top_candidates;
     }
 
-    auto computer = flatten->FactoryComputer(query);
+    auto computer_lease = AcquireQueryComputer(flatten, query, ctx);
+    const auto& computer = computer_lease.computer;
 
     auto is_id_allowed = inner_search_param.is_inner_id_allowed;
     auto ep = inner_search_param.ep;
@@ -150,12 +187,12 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
     Vector<float> line_dists(vector_size, alloc);
     Vector<float> lower_bound_dists(vector_size, alloc);
     Vector<std::pair<float, uint64_t>> node_pair(beam, alloc);
-    auto skip_strategy = create_filter_search_skip_strategy(
-        inner_search_param.skip_strategy_type,
-        inner_search_param.is_inner_id_allowed != nullptr
-            ? inner_search_param.is_inner_id_allowed->ValidRatio()
-            : 1.0F,
-        inner_search_param.skip_ratio);
+    FilterSearchSkipStrategyPtr skip_strategy = nullptr;
+    if (inner_search_param.is_inner_id_allowed != nullptr) {
+        const auto valid_ratio = inner_search_param.is_inner_id_allowed->ValidRatio();
+        skip_strategy = create_filter_search_skip_strategy(
+            inner_search_param.skip_strategy_type, valid_ratio, inner_search_param.skip_ratio);
+    }
     if (rabitq_lower_bound_candidates != nullptr) {
         rabitq_lower_bound_candidates->clear();
     }
@@ -176,6 +213,7 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
     } else {
         flatten->Query(&dist, computer, &ep, 1, ctx);
     }
+
     if (check_func(ep)) {
         top_candidates->Push(dist, ep);
         lower_bound = top_candidates->Top().first;
@@ -200,6 +238,7 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
 
     auto task = [&](uint64_t thread_id) {
         auto worker_computer = flatten->FactoryComputer(query);
+        RecordQueryComputerCreation(ctx == nullptr ? nullptr : ctx->stats);
         SearchTask item;
         while (true) {
             if (queues[thread_id].Pop(item)) {
@@ -369,6 +408,12 @@ ParallelSearcher::search_impl(const GraphInterfacePtr& graph,
     }
     for (auto& future : futures) {
         future.get();
+    }
+
+    if (ctx != nullptr and ctx->stats != nullptr) {
+        auto& stats = *ctx->stats;
+        stats.dist_cmp.fetch_add(dist_cmp, std::memory_order_relaxed);
+        stats.hops.fetch_add(hops, std::memory_order_relaxed);
     }
 
     return top_candidates;

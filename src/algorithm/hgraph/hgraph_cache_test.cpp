@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +30,9 @@
 
 #include "hgraph_cache.h"
 
+#include <cstdint>
+#include <limits>
+#include <new>
 #include <sstream>
 
 #include "impl/allocator/safe_allocator.h"
@@ -174,5 +193,33 @@ TEST_CASE("HGraphCache GetNeighbors", "[ut][hgraph_cache]") {
         REQUIRE(result.size() == 2);
         REQUIRE(result[0] == "key_bb");
         REQUIRE(result[1] == "key_ccc");
+    }
+}
+
+TEST_CASE("HGraphCache Aligned64Allocator", "[ut][hgraph_cache]") {
+    using Alloc = vsag::Aligned64Allocator<uint64_t>;
+
+    SECTION("allocated memory is 64-byte aligned") {
+        Alloc alloc;
+        for (uint64_t n : {uint64_t(1), uint64_t(2), uint64_t(3), uint64_t(17), uint64_t(100)}) {
+            uint64_t* p = alloc.allocate(static_cast<std::size_t>(n));
+            REQUIRE(p != nullptr);
+            REQUIRE(reinterpret_cast<std::uintptr_t>(p) % 64 == 0);
+            alloc.deallocate(p, static_cast<std::size_t>(n));
+        }
+    }
+
+    SECTION("allocate zero returns nullptr") {
+        Alloc alloc;
+        REQUIRE(alloc.allocate(0) == nullptr);
+    }
+
+    SECTION("overflow count is rejected") {
+        // regression test: n * sizeof(T) must be checked for overflow before
+        // alignment rounding, otherwise the old 32-bit mask (~63u) would
+        // truncate the size and hand back a tiny block for a huge request
+        Alloc alloc;
+        constexpr std::size_t kMaxSize = std::numeric_limits<std::size_t>::max();
+        REQUIRE_THROWS_AS(alloc.allocate(kMaxSize / sizeof(uint64_t) + 1), std::bad_alloc);
     }
 }

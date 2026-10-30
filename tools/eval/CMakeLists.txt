@@ -56,7 +56,7 @@ target_link_libraries (eval_performance PRIVATE
     vsag_eval_common
     ${HDF5_CPP_STATIC_LIBRARY}
     ${HDF5_C_STATIC_LIBRARY}
-    z dl)
+    z dl sz)
 add_dependencies (eval_performance hdf5)
 
 if (ENABLE_TESTS)
@@ -72,6 +72,6 @@ if (ENABLE_TESTS)
         vsag_eval_common
         ${HDF5_CPP_STATIC_LIBRARY}
         ${HDF5_C_STATIC_LIBRARY}
-        z dl)
+        z dl sz)
     add_dependencies (eval_dataset_test hdf5 Catch2)
 endif ()

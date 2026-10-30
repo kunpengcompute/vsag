@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -261,13 +276,42 @@ SQ8UniformQuantizer<metric>::ComputeDistsBatch4Impl(Computer<SQ8UniformQuantizer
                                                     float& dists3,
                                                     float& dists4) const {
     // The 4 codes are not contiguous in memory (HGraph passes pointers
-    // from a neighbor list). Calling SQ8UniformComputeCodesIPBatch four
-    // times with n_codes=1 throws away the batching benefit, so for
-    // batch4 we just delegate to the per-pair ComputeImpl.
-    dists1 = this->ComputeImpl(computer.buf_, codes1);
-    dists2 = this->ComputeImpl(computer.buf_, codes2);
-    dists3 = this->ComputeImpl(computer.buf_, codes3);
-    dists4 = this->ComputeImpl(computer.buf_, codes4);
+    // from a neighbor list), so the strided SQ8UniformComputeCodesIPBatch
+    // entry point cannot be used. One SQ8UniformComputeCodesIPBatch4 call
+    // computes the 4 raw u8*u8 dot products (the query is loaded once per
+    // vector on SVE); the metric correction below mirrors ComputeImpl.
+    float raw_ip[4];
+    SQ8UniformComputeCodesIPBatch4(
+        computer.buf_, codes1, codes2, codes3, codes4, this->dim_, raw_ip);
+
+    if constexpr (metric == MetricType::METRIC_TYPE_L2SQR) {
+        norm_type query_norm = *((norm_type*)(computer.buf_ + offset_norm_));
+        const float query_norm_f = static_cast<float>(query_norm);
+        norm_type code_norm1 = *((norm_type*)(codes1 + offset_norm_));
+        norm_type code_norm2 = *((norm_type*)(codes2 + offset_norm_));
+        norm_type code_norm3 = *((norm_type*)(codes3 + offset_norm_));
+        norm_type code_norm4 = *((norm_type*)(codes4 + offset_norm_));
+        dists1 = (query_norm_f + static_cast<float>(code_norm1) - 2 * raw_ip[0]) * scalar_rate_;
+        dists2 = (query_norm_f + static_cast<float>(code_norm2) - 2 * raw_ip[1]) * scalar_rate_;
+        dists3 = (query_norm_f + static_cast<float>(code_norm3) - 2 * raw_ip[2]) * scalar_rate_;
+        dists4 = (query_norm_f + static_cast<float>(code_norm4) - 2 * raw_ip[3]) * scalar_rate_;
+    } else if constexpr (metric == MetricType::METRIC_TYPE_IP or
+                         metric == MetricType::METRIC_TYPE_COSINE) {
+        sum_type query_sum = *((sum_type*)(computer.buf_ + offset_sum_));
+        const float lb = lower_bound_;
+        const float lb2 = lb * lb;
+        sum_type code_sum1 = *((sum_type*)(codes1 + offset_sum_));
+        sum_type code_sum2 = *((sum_type*)(codes2 + offset_sum_));
+        sum_type code_sum3 = *((sum_type*)(codes3 + offset_sum_));
+        sum_type code_sum4 = *((sum_type*)(codes4 + offset_sum_));
+        dists1 = 1 - (lb * (query_sum + code_sum1) + scalar_rate_ * raw_ip[0] + lb2);
+        dists2 = 1 - (lb * (query_sum + code_sum2) + scalar_rate_ * raw_ip[1] + lb2);
+        dists3 = 1 - (lb * (query_sum + code_sum3) + scalar_rate_ * raw_ip[2] + lb2);
+        dists4 = 1 - (lb * (query_sum + code_sum4) + scalar_rate_ * raw_ip[3] + lb2);
+    } else {
+        logger::error("unsupported metric type");
+        dists1 = dists2 = dists3 = dists4 = 0;
+    }
 }
 
 template <MetricType metric>

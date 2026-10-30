@@ -1,3 +1,19 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
+
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -71,7 +87,8 @@ INT8InnerProductDistance(const void* pVect1v, const void* pVect2v, const void* q
 }
 
 #if defined(ENABLE_NEON)
-__inline float32x4x3_t __attribute__((__always_inline__)) vcvt3_f32_f16(const float16x4x3_t a) {
+__inline float32x4x3_t __attribute__((__always_inline__))
+vcvt3_f32_f16(const float16x4x3_t a) {
     float32x4x3_t c;
     c.val[0] = vcvt_f32_f16(a.val[0]);
     c.val[1] = vcvt_f32_f16(a.val[1]);
@@ -79,14 +96,16 @@ __inline float32x4x3_t __attribute__((__always_inline__)) vcvt3_f32_f16(const fl
     return c;
 }
 
-__inline float32x4x2_t __attribute__((__always_inline__)) vcvt2_f32_f16(const float16x4x2_t a) {
+__inline float32x4x2_t __attribute__((__always_inline__))
+vcvt2_f32_f16(const float16x4x2_t a) {
     float32x4x2_t c;
     c.val[0] = vcvt_f32_f16(a.val[0]);
     c.val[1] = vcvt_f32_f16(a.val[1]);
     return c;
 }
 
-__inline float32x4x3_t __attribute__((__always_inline__)) vcvt3_f32_half(const uint16x4x3_t x) {
+__inline float32x4x3_t __attribute__((__always_inline__))
+vcvt3_f32_half(const uint16x4x3_t x) {
     float32x4x3_t c;
     c.val[0] = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(x.val[0]), 16));
     c.val[1] = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(x.val[1]), 16));
@@ -94,13 +113,15 @@ __inline float32x4x3_t __attribute__((__always_inline__)) vcvt3_f32_half(const u
     return c;
 }
 
-__inline float32x4x2_t __attribute__((__always_inline__)) vcvt2_f32_half(const uint16x4x2_t x) {
+__inline float32x4x2_t __attribute__((__always_inline__))
+vcvt2_f32_half(const uint16x4x2_t x) {
     float32x4x2_t c;
     c.val[0] = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(x.val[0]), 16));
     c.val[1] = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(x.val[1]), 16));
     return c;
 }
-__inline float32x4_t __attribute__((__always_inline__)) vcvt_f32_half(const uint16x4_t x) {
+__inline float32x4_t __attribute__((__always_inline__))
+vcvt_f32_half(const uint16x4_t x) {
     return vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(x), 16));
 }
 
@@ -256,7 +277,8 @@ FP32ReduceAdd(const float* x, uint64_t dim) {
 }
 
 #if defined(ENABLE_NEON)
-__inline uint16x8_t __attribute__((__always_inline__)) load_4_short(const uint16_t* data) {
+__inline uint16x8_t __attribute__((__always_inline__))
+load_4_short(const uint16_t* data) {
     uint16_t tmp[] = {data[3], 0, data[2], 0, data[1], 0, data[0], 0};
     return vld1q_u16(tmp);
 }
@@ -312,7 +334,8 @@ FP16SparseAccumulate(float* RESTRICT dists,
 }
 
 #if defined(ENABLE_NEON)
-__inline float32x4_t __attribute__((__always_inline__)) load_4_uint8_to_float(const uint8_t* data) {
+__inline float32x4_t __attribute__((__always_inline__))
+load_4_uint8_to_float(const uint8_t* data) {
     uint32x4_t code_values = {data[0], data[1], data[2], data[3]};
     return vcvtq_f32_u32(code_values);
 }
@@ -327,7 +350,8 @@ load_8_uint8_to_float(const uint8_t* data, float32x4_t& low, float32x4_t& high) 
     high = vcvtq_f32_u32(code_32_high);
 }
 
-__inline void __attribute__((__always_inline__)) load_16_uint8_to_float(
+__inline void __attribute__((__always_inline__))
+load_16_uint8_to_float(
     const uint8_t* data, float32x4_t& f0, float32x4_t& f1, float32x4_t& f2, float32x4_t& f3) {
     uint8x16_t code_vec = vld1q_u8(data);
     uint16x8_t code_16_low = vmovl_u8(vget_low_u8(code_vec));
@@ -433,6 +457,94 @@ SQ8ComputeCodesL2Sqr(const uint8_t* RESTRICT codes1,
         codes1, codes2, lower_bound, diff, dim, &generic::SQ8ComputeCodesL2Sqr);
 #else
     return generic::SQ8ComputeCodesL2Sqr(codes1, codes2, lower_bound, diff, dim);
+#endif
+}
+
+void
+SQ8ComputeIPBatch4(const float* RESTRICT query,
+                   uint64_t dim,
+                   const uint8_t* RESTRICT codes1,
+                   const uint8_t* RESTRICT codes2,
+                   const uint8_t* RESTRICT codes3,
+                   const uint8_t* RESTRICT codes4,
+                   const float* RESTRICT lower_bound,
+                   const float* RESTRICT diff,
+                   float& result1,
+                   float& result2,
+                   float& result3,
+                   float& result4) {
+#if defined(ENABLE_NEON)
+    simd::SQ8ComputeBatch4Impl<simd::SQ8Traits<simd::NEON_SQ8_Tag>, simd::SQ8Batch4Kind::IP>(
+        query,
+        dim,
+        codes1,
+        codes2,
+        codes3,
+        codes4,
+        lower_bound,
+        diff,
+        result1,
+        result2,
+        result3,
+        result4,
+        &generic::SQ8ComputeIPBatch4);
+#else
+    generic::SQ8ComputeIPBatch4(query,
+                                dim,
+                                codes1,
+                                codes2,
+                                codes3,
+                                codes4,
+                                lower_bound,
+                                diff,
+                                result1,
+                                result2,
+                                result3,
+                                result4);
+#endif
+}
+
+void
+SQ8ComputeL2SqrBatch4(const float* RESTRICT query,
+                      uint64_t dim,
+                      const uint8_t* RESTRICT codes1,
+                      const uint8_t* RESTRICT codes2,
+                      const uint8_t* RESTRICT codes3,
+                      const uint8_t* RESTRICT codes4,
+                      const float* RESTRICT lower_bound,
+                      const float* RESTRICT diff,
+                      float& result1,
+                      float& result2,
+                      float& result3,
+                      float& result4) {
+#if defined(ENABLE_NEON)
+    simd::SQ8ComputeBatch4Impl<simd::SQ8Traits<simd::NEON_SQ8_Tag>, simd::SQ8Batch4Kind::L2>(
+        query,
+        dim,
+        codes1,
+        codes2,
+        codes3,
+        codes4,
+        lower_bound,
+        diff,
+        result1,
+        result2,
+        result3,
+        result4,
+        &generic::SQ8ComputeL2SqrBatch4);
+#else
+    generic::SQ8ComputeL2SqrBatch4(query,
+                                   dim,
+                                   codes1,
+                                   codes2,
+                                   codes3,
+                                   codes4,
+                                   lower_bound,
+                                   diff,
+                                   result1,
+                                   result2,
+                                   result3,
+                                   result4);
 #endif
 }
 
@@ -631,12 +743,27 @@ SQ8UniformComputeCodesIPBatch(const uint8_t* RESTRICT query,
     }
 }
 
+void
+SQ8UniformComputeCodesIPBatch4(const uint8_t* RESTRICT query,
+                               const uint8_t* RESTRICT codes1,
+                               const uint8_t* RESTRICT codes2,
+                               const uint8_t* RESTRICT codes3,
+                               const uint8_t* RESTRICT codes4,
+                               uint64_t dim,
+                               float* RESTRICT out) {
+    out[0] = neon::SQ8UniformComputeCodesIP(query, codes1, dim);
+    out[1] = neon::SQ8UniformComputeCodesIP(query, codes2, dim);
+    out[2] = neon::SQ8UniformComputeCodesIP(query, codes3, dim);
+    out[3] = neon::SQ8UniformComputeCodesIP(query, codes4, dim);
+}
+
 #if defined(ENABLE_NEON)
-__inline void __attribute__((__always_inline__)) extract_12_bits_to_mask(const uint8_t* bits,
-                                                                         uint64_t bit_offset,
-                                                                         uint32x4_t& mask0,
-                                                                         uint32x4_t& mask1,
-                                                                         uint32x4_t& mask2) {
+__inline void __attribute__((__always_inline__))
+extract_12_bits_to_mask(const uint8_t* bits,
+                        uint64_t bit_offset,
+                        uint32x4_t& mask0,
+                        uint32x4_t& mask1,
+                        uint32x4_t& mask2) {
     uint64_t byte_idx = bit_offset / 8;
     uint64_t bit_start = bit_offset % 8;
 
@@ -668,10 +795,11 @@ __inline void __attribute__((__always_inline__)) extract_12_bits_to_mask(const u
                          (mask_bits & 0x800) ? 0xFFFFFFFF : 0};
 }
 
-__inline void __attribute__((__always_inline__)) extract_8_bits_to_mask(const uint8_t* bits,
-                                                                        uint64_t bit_offset,
-                                                                        uint32x4_t& mask0,
-                                                                        uint32x4_t& mask1) {
+__inline void __attribute__((__always_inline__))
+extract_8_bits_to_mask(const uint8_t* bits,
+                       uint64_t bit_offset,
+                       uint32x4_t& mask0,
+                       uint32x4_t& mask1) {
     uint64_t byte_idx = bit_offset / 8;
     uint64_t bit_start = bit_offset % 8;
 

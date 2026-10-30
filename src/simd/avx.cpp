@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -92,7 +107,8 @@ Prefetch(const void* data) {
 }
 
 #if defined(ENABLE_AVX)
-__inline __m256i __attribute__((__always_inline__)) load_8_char_and_convert(const uint8_t* data) {
+__inline __m256i __attribute__((__always_inline__))
+load_8_char_and_convert(const uint8_t* data) {
     __m128i first_8 =
         _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, data[3], data[2], data[1], data[0]);
     __m128i second_8 =
@@ -257,7 +273,8 @@ FP32ReduceAdd(const float* x, uint64_t dim) {
 }
 
 #if defined(ENABLE_AVX)
-__inline __m256i __attribute__((__always_inline__)) load_8_short(const uint16_t* data) {
+__inline __m256i __attribute__((__always_inline__))
+load_8_short(const uint16_t* data) {
     return _mm256_set_epi16(data[7],
                             0,
                             data[6],
@@ -422,6 +439,94 @@ SQ8ComputeCodesL2Sqr(const uint8_t* RESTRICT codes1,
 }
 
 void
+SQ8ComputeIPBatch4(const float* RESTRICT query,
+                   uint64_t dim,
+                   const uint8_t* RESTRICT codes1,
+                   const uint8_t* RESTRICT codes2,
+                   const uint8_t* RESTRICT codes3,
+                   const uint8_t* RESTRICT codes4,
+                   const float* RESTRICT lower_bound,
+                   const float* RESTRICT diff,
+                   float& result1,
+                   float& result2,
+                   float& result3,
+                   float& result4) {
+#if defined(ENABLE_AVX)
+    simd::SQ8ComputeBatch4Impl<simd::SQ8Traits<simd::AVX_SQ8_Tag>, simd::SQ8Batch4Kind::IP>(
+        query,
+        dim,
+        codes1,
+        codes2,
+        codes3,
+        codes4,
+        lower_bound,
+        diff,
+        result1,
+        result2,
+        result3,
+        result4,
+        &sse::SQ8ComputeIPBatch4);
+#else
+    sse::SQ8ComputeIPBatch4(query,
+                            dim,
+                            codes1,
+                            codes2,
+                            codes3,
+                            codes4,
+                            lower_bound,
+                            diff,
+                            result1,
+                            result2,
+                            result3,
+                            result4);
+#endif
+}
+
+void
+SQ8ComputeL2SqrBatch4(const float* RESTRICT query,
+                      uint64_t dim,
+                      const uint8_t* RESTRICT codes1,
+                      const uint8_t* RESTRICT codes2,
+                      const uint8_t* RESTRICT codes3,
+                      const uint8_t* RESTRICT codes4,
+                      const float* RESTRICT lower_bound,
+                      const float* RESTRICT diff,
+                      float& result1,
+                      float& result2,
+                      float& result3,
+                      float& result4) {
+#if defined(ENABLE_AVX)
+    simd::SQ8ComputeBatch4Impl<simd::SQ8Traits<simd::AVX_SQ8_Tag>, simd::SQ8Batch4Kind::L2>(
+        query,
+        dim,
+        codes1,
+        codes2,
+        codes3,
+        codes4,
+        lower_bound,
+        diff,
+        result1,
+        result2,
+        result3,
+        result4,
+        &sse::SQ8ComputeL2SqrBatch4);
+#else
+    sse::SQ8ComputeL2SqrBatch4(query,
+                               dim,
+                               codes1,
+                               codes2,
+                               codes3,
+                               codes4,
+                               lower_bound,
+                               diff,
+                               result1,
+                               result2,
+                               result3,
+                               result4);
+#endif
+}
+
+void
 SQ8SparseAccumulate(float* RESTRICT dists,
                     const uint16_t* RESTRICT ids,
                     const uint8_t* RESTRICT vals,
@@ -451,18 +556,20 @@ SQ8SparseAccumulate(float* RESTRICT dists,
 }
 
 #if defined(ENABLE_AVX)
-__inline __m128i __attribute__((__always_inline__)) load_4_char(const uint8_t* data) {
+__inline __m128i __attribute__((__always_inline__))
+load_4_char(const uint8_t* data) {
     return _mm_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, data[3], data[2], data[1], data[0]);
 }
 #endif
 
 #if defined(ENABLE_AVX)
-__inline void __attribute__((__always_inline__)) SQ4Decode16Values(const uint8_t* codes,
-                                                                   uint64_t offset,
-                                                                   __m256& values01,
-                                                                   __m256& values23,
-                                                                   const float* lower_bound,
-                                                                   const float* diff) {
+__inline void __attribute__((__always_inline__))
+SQ4Decode16Values(const uint8_t* codes,
+                  uint64_t offset,
+                  __m256& values01,
+                  __m256& values23,
+                  const float* lower_bound,
+                  const float* diff) {
     // Load 8 bytes (16 4-bit values)
     __m128i code_vec = load_4_char(codes + (offset >> 1));
     __m128i code_vec2 = load_4_char(codes + (offset >> 1) + 4);
@@ -599,6 +706,20 @@ SQ8UniformComputeCodesIPBatch(const uint8_t* RESTRICT query,
     for (uint64_t i = 0; i < n_codes; ++i) {
         out[i] = avx::SQ8UniformComputeCodesIP(query, codes + i * code_stride, dim);
     }
+}
+
+void
+SQ8UniformComputeCodesIPBatch4(const uint8_t* RESTRICT query,
+                               const uint8_t* RESTRICT codes1,
+                               const uint8_t* RESTRICT codes2,
+                               const uint8_t* RESTRICT codes3,
+                               const uint8_t* RESTRICT codes4,
+                               uint64_t dim,
+                               float* RESTRICT out) {
+    out[0] = avx::SQ8UniformComputeCodesIP(query, codes1, dim);
+    out[1] = avx::SQ8UniformComputeCodesIP(query, codes2, dim);
+    out[2] = avx::SQ8UniformComputeCodesIP(query, codes3, dim);
+    out[3] = avx::SQ8UniformComputeCodesIP(query, codes4, dim);
 }
 
 float

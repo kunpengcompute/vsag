@@ -1,3 +1,18 @@
+/*
+    Copyright 2026 Huawei Technologies Co., Ltd.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+*/
 
 // Copyright 2024-present the vsag project
 //
@@ -15,6 +30,7 @@
 
 #include "visited_list.h"
 
+#include <limits>
 #include <thread>
 
 #include "impl/allocator/default_allocator.h"
@@ -57,6 +73,31 @@ TEST_CASE("VisitedList Basic Test", "[ut][VisitedList]") {
         for (auto& id : ids) {
             REQUIRE(vl_ptr->Get(id) == false);
         }
+    }
+
+    SECTION("test check and set") {
+        const std::vector<InnerIdType> ids = {0, 1, 63, 64, 65, static_cast<InnerIdType>(size - 1)};
+        for (const auto id : ids) {
+            REQUIRE(vl_ptr->CheckAndSet(id));
+            REQUIRE_FALSE(vl_ptr->CheckAndSet(id));
+            REQUIRE(vl_ptr->Get(id));
+        }
+
+        vl_ptr->Reset();
+        for (const auto id : ids) {
+            REQUIRE(vl_ptr->CheckAndSet(id));
+            REQUIRE_FALSE(vl_ptr->CheckAndSet(id));
+        }
+    }
+
+    SECTION("test check and set with out-of-range id") {
+        // regression test: CheckAndSet must validate id before touching list_
+        REQUIRE_THROWS_AS(vl_ptr->CheckAndSet(static_cast<InnerIdType>(size)), VsagException);
+        REQUIRE_THROWS_AS(vl_ptr->CheckAndSet(std::numeric_limits<InnerIdType>::max()),
+                          VsagException);
+        // in-range ids still work after the rejected calls
+        REQUIRE(vl_ptr->CheckAndSet(0));
+        REQUIRE_FALSE(vl_ptr->CheckAndSet(0));
     }
 }
 
