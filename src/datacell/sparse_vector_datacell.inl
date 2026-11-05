@@ -190,6 +190,37 @@ SparseVectorDataCell<QuantTmpl, IOTmpl>::GetCodesById(InnerIdType id, bool& need
 
 template <typename QuantTmpl, typename IOTmpl>
 void
+SparseVectorDataCell<QuantTmpl, IOTmpl>::PermuteEntries(const Vector<InnerIdType>& perm) {
+    const uint64_t total_count = this->total_count_;
+    if (perm.size() < total_count) {
+        throw VsagException(ErrorType::INTERNAL_ERROR,
+                            "sparse flatten perm size is smaller than total count");
+    }
+    if (total_count == 0) {
+        return;
+    }
+
+    // Codes keep their variable-size slots in io_; only the doc-location table is
+    // remapped, because every read path (query, GetCodesById, serialize) resolves
+    // ids through this table. Semantically this matches the dense
+    // FlattenDataCell::PermuteEntries: the entry at new id i becomes the entry
+    // previously stored at perm[i], without moving the payloads.
+    std::scoped_lock lock(this->mutex_);
+    Vector<DocLocation> old_locations(total_count, allocator_);
+    this->offset_io_->Read(total_count * sizeof(DocLocation),
+                           0,
+                           reinterpret_cast<uint8_t*>(old_locations.data()));
+    Vector<DocLocation> new_locations(total_count, allocator_);
+    for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
+        new_locations[new_id] = old_locations[perm[new_id]];
+    }
+    this->offset_io_->Write(reinterpret_cast<const uint8_t*>(new_locations.data()),
+                            total_count * sizeof(DocLocation),
+                            0);
+}
+
+template <typename QuantTmpl, typename IOTmpl>
+void
 SparseVectorDataCell<QuantTmpl, IOTmpl>::GetSparseVectorByInnerId(
     InnerIdType inner_id, SparseVector* data, Allocator* specified_allocator) const {
     Allocator* allocator = specified_allocator != nullptr ? specified_allocator : allocator_;

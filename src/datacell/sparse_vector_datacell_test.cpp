@@ -386,4 +386,80 @@ TEST_CASE("SparseDataCell New Format Sentinel", "[ut][SparseDataCell]") {
     }
 }
 
+TEST_CASE("SparseDataCell PermuteEntries Remaps Doc Locations", "[ut][SparseDataCell]") {
+    // HGraph reorders stored entries after deserialization (label-remap load) by
+    // calling PermuteEntries on every data cell; the sparse cell used to fall
+    // through to the FlattenInterface default and throw INTERNAL_ERROR, failing
+    // the whole deserialize. Here the remap itself is verified: after applying a
+    // reversed permutation, new id i must return the vector previously stored at
+    // perm[i], both directly and after a serialize/deserialize roundtrip.
+    constexpr const char* param_str = R"({
+        "io_params": {"type": "memory_io"},
+        "quantization_params": {"type": "sparse"}
+    })";
+    JsonType parsed_json = JsonType::Parse(param_str);
+    auto param = std::make_shared<SparseVectorDataCellParameter>();
+    param->FromJson(parsed_json);
+    IndexCommonParam index_common_param;
+    index_common_param.allocator_ = SafeAllocator::FactoryDefaultAllocator();
+    index_common_param.metric_ = MetricType::METRIC_TYPE_IP;
+    index_common_param.dim_ = 100;
+
+    auto data_cell = FlattenInterface::MakeInstance(param, index_common_param);
+    constexpr uint32_t base_count = 16;
+    auto sparse_vectors = fixtures::GenerateSparseVectors(base_count, 100);
+    data_cell->Train(sparse_vectors.data(), base_count);
+    for (uint32_t i = 0; i < base_count; ++i) {
+        data_cell->InsertVector(sparse_vectors.data() + i, i);
+    }
+
+    // permutation built like HGraph::build_load_permutation(): reversed order,
+    // perm[new_id] is the old id whose entry ends up at new_id after the reorder
+    Vector<InnerIdType> perm(index_common_param.allocator_.get());
+    perm.resize(base_count);
+    for (uint32_t i = 0; i < base_count; ++i) {
+        perm[i] = base_count - 1 - i;
+    }
+    data_cell->PermuteEntries(perm);
+
+    auto check_entry = [&](FlattenInterface* cell, uint32_t new_id, uint32_t old_id) {
+        SparseVector data;
+        cell->GetSparseVectorByInnerId(new_id, &data, index_common_param.allocator_.get());
+        std::vector<std::pair<uint32_t, float>> expected;
+        std::vector<std::pair<uint32_t, float>> actual;
+        for (uint32_t j = 0; j < sparse_vectors[old_id].len_; ++j) {
+            expected.emplace_back(sparse_vectors[old_id].ids_[j], sparse_vectors[old_id].vals_[j]);
+        }
+        for (uint32_t j = 0; j < data.len_; ++j) {
+            actual.emplace_back(data.ids_[j], data.vals_[j]);
+        }
+        std::sort(expected.begin(), expected.end());
+        REQUIRE(actual == expected);
+        index_common_param.allocator_->Deallocate(data.ids_);
+        index_common_param.allocator_->Deallocate(data.vals_);
+    };
+
+    for (uint32_t new_id = 0; new_id < base_count; ++new_id) {
+        check_entry(data_cell.get(), new_id, perm[new_id]);
+    }
+
+    // the remapped layout must survive a serialize/deserialize roundtrip, since
+    // this is exactly the path HGraph takes when reordering entries after loading
+    auto reloaded = FlattenInterface::MakeInstance(param, index_common_param);
+    std::stringstream ss;
+    IOStreamWriter writer(ss);
+    data_cell->Serialize(writer);
+    std::stringstream rss(ss.str());
+    IOStreamReader reader(rss);
+    reloaded->Deserialize(reader);
+    for (uint32_t new_id = 0; new_id < base_count; ++new_id) {
+        check_entry(reloaded.get(), new_id, perm[new_id]);
+    }
+
+    for (auto& item : sparse_vectors) {
+        delete[] item.vals_;
+        delete[] item.ids_;
+    }
+}
+
 }  // namespace vsag

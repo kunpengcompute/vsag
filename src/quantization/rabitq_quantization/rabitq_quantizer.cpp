@@ -1738,9 +1738,11 @@ RaBitQuantizer<metric>::ComputeDistsBatchTransposedImpl(Computer<RaBitQuantizer>
                                                         const uint32_t* idx,
                                                         uint64_t id_count,
                                                         float* dists) const {
-    if (num_bits_per_dim_query_ != 32 or num_bits_per_dim_base_ != 1) {
-        // the 4-bit lookup kernel only supports fp32 query with 1-bit base codes;
-        // other configurations fall back to the regular per-code path
+    if (this->GetBatchMode() != 1) {
+        // the 4-bit lookup kernel only runs when rabitq_enable_batch_ is set and the
+        // configuration is fp32 query with 1-bit base codes; the 4-bit LUT is allocated
+        // and built only in that case, so any other configuration must fall back to the
+        // regular per-code path (GetBatchMode() is the single decision point here)
         for (uint64_t i = 0; i < id_count; ++i) {
             const uint8_t* code = codes + static_cast<uint64_t>(idx[i]) * this->code_size_;
             this->ComputeDistImpl(computer, code, dists + i);

@@ -16,6 +16,7 @@
 #include "sparse_graph_datacell.h"
 
 #include <fmt/format.h>
+#include <sstream>
 
 #include "graph_interface_test.h"
 #include "impl/allocator/safe_allocator.h"
@@ -197,4 +198,117 @@ TEST_CASE("SparseGraphDataCell decodes stored neighbors for reverse-edge updates
     graph->GetIncomingNeighbors(3, incoming);
     REQUIRE(incoming.size() == 1);
     REQUIRE(incoming[0] == 1);
+}
+
+TEST_CASE("SparseGraphDataCell PermuteEntries Keeps Total Count After Move",
+          "[ut][SparseGraphDataCell]") {
+    auto allocator = SafeAllocator::FactoryDefaultAllocator();
+
+    IndexCommonParam common_param;
+    common_param.dim_ = 32;
+    common_param.allocator_ = allocator;
+    auto graph_param = std::make_shared<SparseGraphDatacellParameter>();
+    graph_param->max_degree_ = 8;
+    graph_param->support_delete_ = true;
+    graph_param->remove_flag_bit_ = 8;
+
+    auto graph = GraphInterface::MakeInstance(graph_param, common_param);
+
+    constexpr InnerIdType N = 16;
+    for (InnerIdType id = 0; id < N; ++id) {
+        Vector<InnerIdType> neighbors(allocator.get());
+        neighbors.emplace_back((id + 1) % N);
+        neighbors.emplace_back((id + 3) % N);
+        graph->InsertNeighborsById(id, neighbors);
+    }
+    REQUIRE(graph->TotalCount() == N);
+    REQUIRE(graph->CheckIdExists(N - 1));
+
+    // same call as the HGraph force-remove path: the moved-from id is erased from
+    // the neighbor map, while total_count_ must keep describing the N id slots
+    graph->Move(N - 1, 2);
+    REQUIRE_FALSE(graph->CheckIdExists(N - 1));
+    REQUIRE(graph->TotalCount() == N);
+
+    // permutation built like HGraph::build_load_permutation(): reversed order
+    Vector<InnerIdType> perm(allocator.get());
+    Vector<InnerIdType> imap(allocator.get());
+    perm.resize(N);
+    imap.resize(N);
+    for (InnerIdType i = 0; i < N; ++i) {
+        perm[i] = N - 1 - i;
+        imap[N - 1 - i] = i;
+    }
+
+    uint64_t edge_count_before = 0;
+    for (InnerIdType id = 0; id < N; ++id) {
+        Vector<InnerIdType> neighbors(allocator.get());
+        graph->GetNeighbors(id, neighbors);
+        edge_count_before += neighbors.size();
+    }
+
+    graph->PermuteEntries(perm, imap);
+
+    // the id space (and thus TotalCount) must survive the permutation
+    REQUIRE(graph->TotalCount() == N);
+    uint64_t edge_count_after = 0;
+    for (InnerIdType id = 0; id < N; ++id) {
+        Vector<InnerIdType> neighbors(allocator.get());
+        graph->GetNeighbors(id, neighbors);
+        edge_count_after += neighbors.size();
+    }
+    REQUIRE(edge_count_after == edge_count_before);
+}
+
+TEST_CASE("SparseGraphDataCell PermuteEntries Serialize Roundtrip Keeps Total Count",
+          "[ut][SparseGraphDataCell]") {
+    auto allocator = SafeAllocator::FactoryDefaultAllocator();
+
+    IndexCommonParam common_param;
+    common_param.dim_ = 32;
+    common_param.allocator_ = allocator;
+    auto graph_param = std::make_shared<SparseGraphDatacellParameter>();
+    graph_param->max_degree_ = 8;
+    graph_param->support_delete_ = true;
+    graph_param->remove_flag_bit_ = 8;
+
+    auto graph = GraphInterface::MakeInstance(graph_param, common_param);
+
+    constexpr InnerIdType N = 16;
+    for (InnerIdType id = 0; id < N; ++id) {
+        Vector<InnerIdType> neighbors(allocator.get());
+        neighbors.emplace_back((id + 1) % N);
+        graph->InsertNeighborsById(id, neighbors);
+    }
+
+    graph->Move(N - 1, 2);
+
+    Vector<InnerIdType> perm(allocator.get());
+    Vector<InnerIdType> imap(allocator.get());
+    perm.resize(N);
+    imap.resize(N);
+    for (InnerIdType i = 0; i < N; ++i) {
+        perm[i] = N - 1 - i;
+        imap[N - 1 - i] = i;
+    }
+    graph->PermuteEntries(perm, imap);
+    REQUIRE(graph->TotalCount() == N);
+
+    std::stringstream ss;
+    vsag::IOStreamWriter writer(ss);
+    graph->Serialize(writer);
+
+    auto loaded = GraphInterface::MakeInstance(graph_param, common_param);
+    vsag::IOStreamReader reader(ss);
+    loaded->Deserialize(reader);
+
+    // Deserialize must restore the id-space size from the stream instead of
+    // shrinking it to the neighbor-map size (the map lost one id to Move)
+    REQUIRE(loaded->TotalCount() == N);
+    // the hole survives the roundtrip: old id N-1 was erased by Move and maps
+    // to new id 0 under the reversed permutation
+    REQUIRE_FALSE(loaded->CheckIdExists(0));
+    for (InnerIdType id = 1; id < N; ++id) {
+        REQUIRE(loaded->CheckIdExists(id));
+    }
 }
