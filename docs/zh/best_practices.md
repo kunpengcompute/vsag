@@ -35,7 +35,7 @@
         type: "build,search"
         index_name: "hgraph"
         create_params: '{"dim":960,"dtype":"float32","metric_type":"l2","index_param":{"base_quantization_type":"rabitq","rabitq_enable_batch": true,"max_degree":192,"ef_construction":2000,"precise_quantization_type":"sq8_uniform", "use_reorder":true}}'
-        search_params: '{"hgraph":{"ef_search":300}}'
+        search_params: '{"hgraph":{"ef_search":450}}'
         index_path: "/path/to/index/gist/hgraph_index"
         search_mode: "knn"
         topk: 10
@@ -74,8 +74,9 @@
 
 >![](public_sys-resources/icon-note.gif) **说明：** 
 > 在type字段设置为`build,search`时进行上述参数调优，确保召回率大于0.95的情况下，寻找QPS最高的参数组合。
+> gist数据集的调优参数建议设置为max_degree=192、ef_construction=2000、ef_search=450。
 
-## （可选）UT测试
+## UT测试
 
 执行以下UT测试脚本。
 
@@ -84,3 +85,7 @@ cd /path/to/vsag
 BUILD_DIR=build-ft bash scripts/coverage/run_ut.sh --no-coverage \
     --filter '[ut][RaBitQuantizer],[ut][RaBitQuantizerParameter],[ut][RaBitQSplitDataCell],[ut][query_computer_pool],[ut][SQ8Quantizer],[ut][SQ8QuantizerParameter],[ut][SQ8UniformQuantizer],[ut][SQ8UniformQuantizerParameter],[ut][simd]~[!benchmark],[ft][hgraph][rabitq],[ut][LabelTable]'
 ```
+
+UT测试完成后回显如下所示。
+
+![](figures/ut测试回显.png)

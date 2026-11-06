@@ -8,11 +8,11 @@
 
 | 操作系统 | CPU类型 | 内存 | 编译器 | 其他 |
 | --- | --- | --- | --- | --- |
-| openEuler 24.03 LTS SP3 | 鲲鹏950 7592C处理器 | 24 * 64GB | GCC 12.3.1 | CMake>=3.22.0 |
+| openEuler 24.03 LTS SP3 | 鲲鹏950 7592C处理器 | 24 * 64GB | GCC 12.3.1 | CMake 3.22.0及以上版本 |
 
 ## 编译安装
 
-先从GitHub下载vsag开源代码，然后从GitCode下载vsag补丁代码，应用补丁。
+先从GitHub下载vsag开源代码，然后下载vsag补丁代码，应用补丁。
 
 1. 获取开源代码，假设安装路径为“/path/to”。
 
@@ -21,7 +21,7 @@
     git clone -b v1.0.0 https://github.com/antgroup/vsag.git
     ```
 
-2. 下载hnswlib的Patch文件，假设安装路径为“/path/to”。
+2. 下载vsag的Patch文件，假设安装路径为“/path/to”。
 
     ```bash
     git clone -b v1.0.0 https://gitcode.com/boostkit/vsag.git vsag-patch
@@ -157,3 +157,7 @@
     cd /path/to/vsag
     VSAG_ENABLE_TOOLS=ON make release
     ```
+    
+    编译完成后回显如下所示。
+
+    ![](figures/vsag编译回显.png)

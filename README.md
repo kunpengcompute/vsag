@@ -17,9 +17,11 @@ vsag是蚂蚁开源的高性能C++向量索引库，用于近似最近邻搜索�
 ```text
 vsag/
 ├─ 0001-vsag_1.0.0-optimize-rabitq_sq8.patch      // 优化补丁
+├─ README.md                                      // 项目介绍
 └── docs
    ├── LICENSE
    └── zh
+      ├── menu_vsag.md                            // 导航菜单
       ├── feature_introduction.md                 // 特性介绍
       ├── best_practices.md                       // 最佳实践
       ├── installation_guide.md                   // 安装指南

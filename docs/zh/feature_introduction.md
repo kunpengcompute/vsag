@@ -1,5 +1,7 @@
 # 特性介绍
 
+本章介绍vsag的总体架构和核心优化特性。
+
 ## 架构介绍
 
 本节介绍vsag主要算法的逻辑结构与所包含的模块含义及作用。
@@ -8,33 +10,25 @@
 
 vsag采用自上而下的分层架构，各层之间通过抽象接口解耦，便于独立替换与优化。一次典型的搜索调用自上而下经过如下各层：
 
-```text
-公共 API 层（include/vsag）
-    │  Index / Dataset / Factory / Filter / Resource
-    ▼
-工厂与引擎层（src/factory）
-    │  Engine / IndexRegistry：解析索引类型与JSON参数，装配资源
-    ▼
-索引实现层（src/index）
-    │  IndexImpl<T>：实现公共Index接口，负责入参校验与错误转换
-    ▼
-算法层（src/algorithm）
-    │  InnerIndexInterface派生的各索引算法（HGraph、HNSW、IVF等）
-    ▼
-搜索器层（src/impl/searcher）
-    │  BasicSearcher / ParallelSearcher：贪心图遍历与结果堆管理
-    ▼
-数据单元层（src/datacell）
-    │  GraphInterface：图数据    FlattenInterface：向量码表
-    ▼
-量化层（src/quantization）
-    │  Quantizer：训练与编码    Computer：查询侧距离计算
-    ▼
-SIMD 计算层（src/simd）
-    │  按CPU指令集（SSE/AVX2/AVX512/NEON）运行时分发计算核
-    ▼
-IO 与序列化层（src/io、src/storage）
-       BasicIo系列：内存/缓冲/异步/只读IO    序列化框架：流式读写与Footer
+```mermaid
+flowchart TD
+    A["公共 API 层（include/vsag）<br/>Index / Dataset / Factory / Filter / Resource"]
+    B["工厂与引擎层（src/factory）<br/>Engine / IndexRegistry：解析索引类型与JSON参数，装配资源"]
+    C["索引实现层（src/index）<br/>IndexImpl&lt;T&gt;：实现公共Index接口，负责入参校验与错误转换"]
+    D["算法层（src/algorithm）<br/>InnerIndexInterface派生的各索引算法（HGraph、HNSW、IVF等）"]
+    E["搜索器层（src/impl/searcher）<br/>BasicSearcher / ParallelSearcher：贪心图遍历与结果堆管理"]
+    F["数据单元层（src/datacell）<br/>GraphInterface：图数据　FlattenInterface：向量码表"]
+    G["量化层（src/quantization）<br/>Quantizer：训练与编码　Computer：查询侧距离计算"]
+    H["SIMD 计算层（src/simd）<br/>按CPU指令集（SSE/AVX2/AVX512/NEON）运行时分发计算核"]
+    I["IO 与序列化层（src/io、src/storage）<br/>BasicIo系列：内存/缓冲/异步/只读IO　序列化框架：流式读写与Footer"]
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
 ```
 
 ### 各模块含义及作用
