@@ -1689,7 +1689,7 @@ index 8c83187..bcee56a 100644
      ShrinkToFit(InnerIdType capacity) override {
          this->x_bit_cell_->Shrink(capacity);
 diff --git a/src/datacell/sparse_graph_datacell.cpp b/src/datacell/sparse_graph_datacell.cpp
-index 61c7103..23a77a7 100644
+index 61c7103..4019202 100644
 --- a/src/datacell/sparse_graph_datacell.cpp
 +++ b/src/datacell/sparse_graph_datacell.cpp
 @@ -1,3 +1,19 @@
@@ -1712,7 +1712,19 @@ index 61c7103..23a77a7 100644
  
  // Copyright 2024-present the vsag project
  //
-@@ -336,4 +352,82 @@ SparseGraphDataCell::Move(InnerIdType from, InnerIdType to) {
+@@ -168,7 +184,10 @@ SparseGraphDataCell::Deserialize(StreamReader& reader) {
+         this->neighbors_[key] = std::make_unique<vsag::Vector<InnerIdType>>(allocator_);
+         StreamReader::ReadVector(reader, *(this->neighbors_[key]));
+     }
+-    this->total_count_ = size;
++    // total_count_ is restored by GraphInterface::Deserialize from the stream and
++    // describes the id space, which may be larger than the map when Move() erased
++    // moved-from ids; do not overwrite it with the map size (same as the dense
++    // GraphDataCell, which also keeps the streamed value)
+     if (is_support_delete_) {
+         for (uint64_t i = 0; i < size; ++i) {
+             InnerIdType key;
+@@ -336,4 +355,85 @@ SparseGraphDataCell::Move(InnerIdType from, InnerIdType to) {
      this->neighbors_.erase(from);
  }
  
@@ -1781,7 +1793,10 @@ index 61c7103..23a77a7 100644
 +        if (is_support_delete_) {
 +            this->node_version_.swap(new_node_version);
 +        }
-+        this->total_count_.store(static_cast<InnerIdType>(this->neighbors_.size()));
++        // Permutation only remaps ids, it never changes the id space: Move() erases
++        // moved-from ids without touching total_count_, so storing neighbors_.size()
++        // here would shrink the count by the number of holes and break the
++        // GraphInterface invariant (TotalCount() vs node_version_ / serialization).
 +    }
 +
 +    if (reverse_edges_) {
@@ -1829,6 +1844,276 @@ index 1bfdf36..80054ce 100644
      void
      ShrinkToFit(InnerIdType capacity) override {
      }
+diff --git a/src/datacell/sparse_graph_datacell_test.cpp b/src/datacell/sparse_graph_datacell_test.cpp
+index 299d830..746f84e 100644
+--- a/src/datacell/sparse_graph_datacell_test.cpp
++++ b/src/datacell/sparse_graph_datacell_test.cpp
+@@ -16,6 +16,7 @@
+ #include "sparse_graph_datacell.h"
+ 
+ #include <fmt/format.h>
++#include <sstream>
+ 
+ #include "graph_interface_test.h"
+ #include "impl/allocator/safe_allocator.h"
+@@ -198,3 +199,116 @@ TEST_CASE("SparseGraphDataCell decodes stored neighbors for reverse-edge updates
+     REQUIRE(incoming.size() == 1);
+     REQUIRE(incoming[0] == 1);
+ }
++
++TEST_CASE("SparseGraphDataCell PermuteEntries Keeps Total Count After Move",
++          "[ut][SparseGraphDataCell]") {
++    auto allocator = SafeAllocator::FactoryDefaultAllocator();
++
++    IndexCommonParam common_param;
++    common_param.dim_ = 32;
++    common_param.allocator_ = allocator;
++    auto graph_param = std::make_shared<SparseGraphDatacellParameter>();
++    graph_param->max_degree_ = 8;
++    graph_param->support_delete_ = true;
++    graph_param->remove_flag_bit_ = 8;
++
++    auto graph = GraphInterface::MakeInstance(graph_param, common_param);
++
++    constexpr InnerIdType N = 16;
++    for (InnerIdType id = 0; id < N; ++id) {
++        Vector<InnerIdType> neighbors(allocator.get());
++        neighbors.emplace_back((id + 1) % N);
++        neighbors.emplace_back((id + 3) % N);
++        graph->InsertNeighborsById(id, neighbors);
++    }
++    REQUIRE(graph->TotalCount() == N);
++    REQUIRE(graph->CheckIdExists(N - 1));
++
++    // same call as the HGraph force-remove path: the moved-from id is erased from
++    // the neighbor map, while total_count_ must keep describing the N id slots
++    graph->Move(N - 1, 2);
++    REQUIRE_FALSE(graph->CheckIdExists(N - 1));
++    REQUIRE(graph->TotalCount() == N);
++
++    // permutation built like HGraph::build_load_permutation(): reversed order
++    Vector<InnerIdType> perm(allocator.get());
++    Vector<InnerIdType> imap(allocator.get());
++    perm.resize(N);
++    imap.resize(N);
++    for (InnerIdType i = 0; i < N; ++i) {
++        perm[i] = N - 1 - i;
++        imap[N - 1 - i] = i;
++    }
++
++    uint64_t edge_count_before = 0;
++    for (InnerIdType id = 0; id < N; ++id) {
++        Vector<InnerIdType> neighbors(allocator.get());
++        graph->GetNeighbors(id, neighbors);
++        edge_count_before += neighbors.size();
++    }
++
++    graph->PermuteEntries(perm, imap);
++
++    // the id space (and thus TotalCount) must survive the permutation
++    REQUIRE(graph->TotalCount() == N);
++    uint64_t edge_count_after = 0;
++    for (InnerIdType id = 0; id < N; ++id) {
++        Vector<InnerIdType> neighbors(allocator.get());
++        graph->GetNeighbors(id, neighbors);
++        edge_count_after += neighbors.size();
++    }
++    REQUIRE(edge_count_after == edge_count_before);
++}
++
++TEST_CASE("SparseGraphDataCell PermuteEntries Serialize Roundtrip Keeps Total Count",
++          "[ut][SparseGraphDataCell]") {
++    auto allocator = SafeAllocator::FactoryDefaultAllocator();
++
++    IndexCommonParam common_param;
++    common_param.dim_ = 32;
++    common_param.allocator_ = allocator;
++    auto graph_param = std::make_shared<SparseGraphDatacellParameter>();
++    graph_param->max_degree_ = 8;
++    graph_param->support_delete_ = true;
++    graph_param->remove_flag_bit_ = 8;
++
++    auto graph = GraphInterface::MakeInstance(graph_param, common_param);
++
++    constexpr InnerIdType N = 16;
++    for (InnerIdType id = 0; id < N; ++id) {
++        Vector<InnerIdType> neighbors(allocator.get());
++        neighbors.emplace_back((id + 1) % N);
++        graph->InsertNeighborsById(id, neighbors);
++    }
++
++    graph->Move(N - 1, 2);
++
++    Vector<InnerIdType> perm(allocator.get());
++    Vector<InnerIdType> imap(allocator.get());
++    perm.resize(N);
++    imap.resize(N);
++    for (InnerIdType i = 0; i < N; ++i) {
++        perm[i] = N - 1 - i;
++        imap[N - 1 - i] = i;
++    }
++    graph->PermuteEntries(perm, imap);
++    REQUIRE(graph->TotalCount() == N);
++
++    std::stringstream ss;
++    vsag::IOStreamWriter writer(ss);
++    graph->Serialize(writer);
++
++    auto loaded = GraphInterface::MakeInstance(graph_param, common_param);
++    vsag::IOStreamReader reader(ss);
++    loaded->Deserialize(reader);
++
++    // Deserialize must restore the id-space size from the stream instead of
++    // shrinking it to the neighbor-map size (the map lost one id to Move)
++    REQUIRE(loaded->TotalCount() == N);
++    // the hole survives the roundtrip: old id N-1 was erased by Move and maps
++    // to new id 0 under the reversed permutation
++    REQUIRE_FALSE(loaded->CheckIdExists(0));
++    for (InnerIdType id = 1; id < N; ++id) {
++        REQUIRE(loaded->CheckIdExists(id));
++    }
++}
+diff --git a/src/datacell/sparse_vector_datacell.h b/src/datacell/sparse_vector_datacell.h
+index 19ccce0..087c678 100644
+--- a/src/datacell/sparse_vector_datacell.h
++++ b/src/datacell/sparse_vector_datacell.h
+@@ -90,6 +90,9 @@ public:
+     void
+     Prefetch(InnerIdType id) override{};
+ 
++    void
++    PermuteEntries(const Vector<InnerIdType>& perm) override;
++
+     void
+     ExportModel(const FlattenInterfacePtr& other) const override {
+         std::stringstream ss;
+diff --git a/src/datacell/sparse_vector_datacell.inl b/src/datacell/sparse_vector_datacell.inl
+index 0e04d94..f288157 100644
+--- a/src/datacell/sparse_vector_datacell.inl
++++ b/src/datacell/sparse_vector_datacell.inl
+@@ -188,6 +188,37 @@ SparseVectorDataCell<QuantTmpl, IOTmpl>::GetCodesById(InnerIdType id, bool& need
+     return io_->Read(location.size, location.offset, need_release);
+ }
+ 
++template <typename QuantTmpl, typename IOTmpl>
++void
++SparseVectorDataCell<QuantTmpl, IOTmpl>::PermuteEntries(const Vector<InnerIdType>& perm) {
++    const uint64_t total_count = this->total_count_;
++    if (perm.size() < total_count) {
++        throw VsagException(ErrorType::INTERNAL_ERROR,
++                            "sparse flatten perm size is smaller than total count");
++    }
++    if (total_count == 0) {
++        return;
++    }
++
++    // Codes keep their variable-size slots in io_; only the doc-location table is
++    // remapped, because every read path (query, GetCodesById, serialize) resolves
++    // ids through this table. Semantically this matches the dense
++    // FlattenDataCell::PermuteEntries: the entry at new id i becomes the entry
++    // previously stored at perm[i], without moving the payloads.
++    std::scoped_lock lock(this->mutex_);
++    Vector<DocLocation> old_locations(total_count, allocator_);
++    this->offset_io_->Read(total_count * sizeof(DocLocation),
++                           0,
++                           reinterpret_cast<uint8_t*>(old_locations.data()));
++    Vector<DocLocation> new_locations(total_count, allocator_);
++    for (InnerIdType new_id = 0; new_id < total_count; ++new_id) {
++        new_locations[new_id] = old_locations[perm[new_id]];
++    }
++    this->offset_io_->Write(reinterpret_cast<const uint8_t*>(new_locations.data()),
++                            total_count * sizeof(DocLocation),
++                            0);
++}
++
+ template <typename QuantTmpl, typename IOTmpl>
+ void
+ SparseVectorDataCell<QuantTmpl, IOTmpl>::GetSparseVectorByInnerId(
+diff --git a/src/datacell/sparse_vector_datacell_test.cpp b/src/datacell/sparse_vector_datacell_test.cpp
+index d187140..df07c83 100644
+--- a/src/datacell/sparse_vector_datacell_test.cpp
++++ b/src/datacell/sparse_vector_datacell_test.cpp
+@@ -386,4 +386,80 @@ TEST_CASE("SparseDataCell New Format Sentinel", "[ut][SparseDataCell]") {
+     }
+ }
+ 
++TEST_CASE("SparseDataCell PermuteEntries Remaps Doc Locations", "[ut][SparseDataCell]") {
++    // HGraph reorders stored entries after deserialization (label-remap load) by
++    // calling PermuteEntries on every data cell; the sparse cell used to fall
++    // through to the FlattenInterface default and throw INTERNAL_ERROR, failing
++    // the whole deserialize. Here the remap itself is verified: after applying a
++    // reversed permutation, new id i must return the vector previously stored at
++    // perm[i], both directly and after a serialize/deserialize roundtrip.
++    constexpr const char* param_str = R"({
++        "io_params": {"type": "memory_io"},
++        "quantization_params": {"type": "sparse"}
++    })";
++    JsonType parsed_json = JsonType::Parse(param_str);
++    auto param = std::make_shared<SparseVectorDataCellParameter>();
++    param->FromJson(parsed_json);
++    IndexCommonParam index_common_param;
++    index_common_param.allocator_ = SafeAllocator::FactoryDefaultAllocator();
++    index_common_param.metric_ = MetricType::METRIC_TYPE_IP;
++    index_common_param.dim_ = 100;
++
++    auto data_cell = FlattenInterface::MakeInstance(param, index_common_param);
++    constexpr uint32_t base_count = 16;
++    auto sparse_vectors = fixtures::GenerateSparseVectors(base_count, 100);
++    data_cell->Train(sparse_vectors.data(), base_count);
++    for (uint32_t i = 0; i < base_count; ++i) {
++        data_cell->InsertVector(sparse_vectors.data() + i, i);
++    }
++
++    // permutation built like HGraph::build_load_permutation(): reversed order,
++    // perm[new_id] is the old id whose entry ends up at new_id after the reorder
++    Vector<InnerIdType> perm(index_common_param.allocator_.get());
++    perm.resize(base_count);
++    for (uint32_t i = 0; i < base_count; ++i) {
++        perm[i] = base_count - 1 - i;
++    }
++    data_cell->PermuteEntries(perm);
++
++    auto check_entry = [&](FlattenInterface* cell, uint32_t new_id, uint32_t old_id) {
++        SparseVector data;
++        cell->GetSparseVectorByInnerId(new_id, &data, index_common_param.allocator_.get());
++        std::vector<std::pair<uint32_t, float>> expected;
++        std::vector<std::pair<uint32_t, float>> actual;
++        for (uint32_t j = 0; j < sparse_vectors[old_id].len_; ++j) {
++            expected.emplace_back(sparse_vectors[old_id].ids_[j], sparse_vectors[old_id].vals_[j]);
++        }
++        for (uint32_t j = 0; j < data.len_; ++j) {
++            actual.emplace_back(data.ids_[j], data.vals_[j]);
++        }
++        std::sort(expected.begin(), expected.end());
++        REQUIRE(actual == expected);
++        index_common_param.allocator_->Deallocate(data.ids_);
++        index_common_param.allocator_->Deallocate(data.vals_);
++    };
++
++    for (uint32_t new_id = 0; new_id < base_count; ++new_id) {
++        check_entry(data_cell.get(), new_id, perm[new_id]);
++    }
++
++    // the remapped layout must survive a serialize/deserialize roundtrip, since
++    // this is exactly the path HGraph takes when reordering entries after loading
++    auto reloaded = FlattenInterface::MakeInstance(param, index_common_param);
++    std::stringstream ss;
++    IOStreamWriter writer(ss);
++    data_cell->Serialize(writer);
++    std::stringstream rss(ss.str());
++    IOStreamReader reader(rss);
++    reloaded->Deserialize(reader);
++    for (uint32_t new_id = 0; new_id < base_count; ++new_id) {
++        check_entry(reloaded.get(), new_id, perm[new_id]);
++    }
++
++    for (auto& item : sparse_vectors) {
++        delete[] item.vals_;
++        delete[] item.ids_;
++    }
++}
++
+ }  // namespace vsag
 diff --git a/src/impl/label_table/label_table.h b/src/impl/label_table/label_table.h
 index 819fb97..952d5e8 100644
 --- a/src/impl/label_table/label_table.h
@@ -2860,7 +3145,7 @@ index 13ed31c..f9c0473 100644
      inline QuantT&
      cast() {
 diff --git a/src/quantization/rabitq_quantization/rabitq_quantizer.cpp b/src/quantization/rabitq_quantization/rabitq_quantizer.cpp
-index 5344e7b..d6baa03 100644
+index 5344e7b..df9760c 100644
 --- a/src/quantization/rabitq_quantization/rabitq_quantizer.cpp
 +++ b/src/quantization/rabitq_quantization/rabitq_quantizer.cpp
 @@ -1,3 +1,19 @@
@@ -3116,7 +3401,7 @@ index 5344e7b..d6baa03 100644
      norm_type query_norm = *((norm_type*)(query_codes + query_offset_norm_));
      norm_type base_norm = *((norm_type*)(base_codes + offset_norm_));
  
-@@ -1599,6 +1641,138 @@ RaBitQuantizer<metric>::ComputeQueryBaseImpl(const uint8_t* query_codes,
+@@ -1599,6 +1641,140 @@ RaBitQuantizer<metric>::ComputeQueryBaseImpl(const uint8_t* query_codes,
      return result;
  }
  
@@ -3217,9 +3502,11 @@ index 5344e7b..d6baa03 100644
 +                                                        const uint32_t* idx,
 +                                                        uint64_t id_count,
 +                                                        float* dists) const {
-+    if (num_bits_per_dim_query_ != 32 or num_bits_per_dim_base_ != 1) {
-+        // the 4-bit lookup kernel only supports fp32 query with 1-bit base codes;
-+        // other configurations fall back to the regular per-code path
++    if (this->GetBatchMode() != 1) {
++        // the 4-bit lookup kernel only runs when rabitq_enable_batch_ is set and the
++        // configuration is fp32 query with 1-bit base codes; the 4-bit LUT is allocated
++        // and built only in that case, so any other configuration must fall back to the
++        // regular per-code path (GetBatchMode() is the single decision point here)
 +        for (uint64_t i = 0; i < id_count; ++i) {
 +            const uint8_t* code = codes + static_cast<uint64_t>(idx[i]) * this->code_size_;
 +            this->ComputeDistImpl(computer, code, dists + i);
@@ -3255,7 +3542,7 @@ index 5344e7b..d6baa03 100644
  template <MetricType metric>
  float
  RaBitQuantizer<metric>::ComputeImpl(const uint8_t* codes1, const uint8_t* codes2) const {
-@@ -1755,8 +1929,8 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
+@@ -1755,8 +1931,8 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
              for (uint64_t d = 0; d < this->dim_; ++d) {
                  query_raw_norm += query[d] * query[d];
              }
@@ -3265,7 +3552,7 @@ index 5344e7b..d6baa03 100644
          // 1. pca
          if (pca_dim_ != this->original_dim_) {
              pca_->Transform(query, pca_data.data());
-@@ -1792,7 +1966,9 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
+@@ -1792,7 +1968,9 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
                       lower_bound,
                       delta,
                       query_sum);
@@ -3275,7 +3562,7 @@ index 5344e7b..d6baa03 100644
              // store info
              *(float*)(computer.buf_ + query_offset_lb_) = lower_bound;
              *(float*)(computer.buf_ + query_offset_delta_) = delta;
-@@ -1817,6 +1993,17 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
+@@ -1817,6 +1995,17 @@ RaBitQuantizer<metric>::ProcessQueryImpl(const float* query,
                  reinterpret_cast<float*>(computer.buf_ + query_offset_filter_lut_));
          }
  
@@ -3470,10 +3757,10 @@ index b9cc519..00d726c 100644
  };
  }  // namespace vsag
 diff --git a/src/quantization/rabitq_quantization/rabitq_quantizer_test.cpp b/src/quantization/rabitq_quantization/rabitq_quantizer_test.cpp
-index 649818c..79def01 100644
+index 649818c..0bd8bc1 100644
 --- a/src/quantization/rabitq_quantization/rabitq_quantizer_test.cpp
 +++ b/src/quantization/rabitq_quantization/rabitq_quantizer_test.cpp
-@@ -772,3 +772,86 @@ TEST_CASE("RaBitQ Query SQ Transform With All Same Element", "[ut][RaBitQuantize
+@@ -772,3 +772,137 @@ TEST_CASE("RaBitQ Query SQ Transform With All Same Element", "[ut][RaBitQuantize
          REQUIRE(is_approx_zero(original_data[i] - decode_data[i]));
      }
  }
@@ -3558,6 +3845,57 @@ index 649818c..79def01 100644
 +            REQUIRE(std::abs(batch_origin[0] - dist_origin) <= 1e-6F);
 +            REQUIRE(std::abs(batch_flipped[0] - dist_flipped) <= 1e-6F);
 +        }
++    }
++}
++
++TEST_CASE("RaBitQ Batch Mode Enable-Batch Guard", "[ut][RaBitQuantizer]") {
++    constexpr auto dim = 64;
++    constexpr auto count = 32;
++    auto allocator = SafeAllocator::FactoryDefaultAllocator();
++    auto vecs = fixtures::generate_vectors(count + 1, dim);
++
++    // the 4-bit LUT fast path must also require rabitq_enable_batch_: with batch
++    // disabled the LUT is neither allocated nor built (query_offset_4bit_lut_
++    // stays 0), so the batch interface must fall back to the per-code path
++    RaBitQuantizer<MetricType::METRIC_TYPE_L2SQR> quantizer(
++        dim,
++        dim,
++        /*num_bits_per_dim_query=*/32,
++        /*num_bits_per_dim_base=*/1,
++        /*use_fht=*/false,
++        /*use_mrq=*/false,
++        allocator.get(),
++        RaBitQuantizerParameter::DEFAULT_RABITQ_VERSION,
++        RaBitQuantizerParameter::DEFAULT_RABITQ_ERROR_RATE,
++        RaBitQuantizerParameter::DEFAULT_RABITQ_BITS_PER_DIM_FILTER,
++        /*rabitq_enable_batch=*/false);
++    REQUIRE(quantizer.TrainImpl(vecs.data(), count + 1));
++
++    REQUIRE(quantizer.GetBatchMode() == 0);
++    REQUIRE(quantizer.Get4BitLutOffset() == 0);
++
++    const auto code_size = quantizer.GetCodeSize();
++    std::vector<uint8_t> codes(static_cast<uint64_t>(count) * code_size, 0);
++    for (uint32_t i = 0; i < count; ++i) {
++        REQUIRE(quantizer.EncodeOne(vecs.data() + i * dim, codes.data() + i * code_size));
++    }
++
++    auto computer = quantizer.FactoryComputer();
++    computer->SetQuery(vecs.data() + static_cast<uint64_t>(count) * dim);
++
++    std::vector<uint32_t> idx(count);
++    for (uint32_t i = 0; i < count; ++i) {
++        idx[i] = i;
++    }
++    std::vector<float> batch_dists(count, 0.0F);
++    quantizer.ComputeDistsBatchTransposedImpl(
++        *computer, codes.data(), idx.data(), count, batch_dists.data());
++
++    // the batch interface must agree with the regular per-code path even when
++    // the bit widths alone would select the 4-bit LUT kernel
++    for (uint32_t i = 0; i < count; ++i) {
++        const auto single_dist = quantizer.ComputeDist(*computer, codes.data() + i * code_size);
++        REQUIRE(std::abs(batch_dists[i] - single_dist) <= 1e-2F);
 +    }
 +}
 diff --git a/src/quantization/scalar_quantization/scalar_quantizer.cpp b/src/quantization/scalar_quantization/scalar_quantizer.cpp
