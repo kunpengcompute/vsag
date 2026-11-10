@@ -184,7 +184,10 @@ SparseGraphDataCell::Deserialize(StreamReader& reader) {
         this->neighbors_[key] = std::make_unique<vsag::Vector<InnerIdType>>(allocator_);
         StreamReader::ReadVector(reader, *(this->neighbors_[key]));
     }
-    this->total_count_ = size;
+    // total_count_ is restored by GraphInterface::Deserialize from the stream and
+    // describes the id space, which may be larger than the map when Move() erased
+    // moved-from ids; do not overwrite it with the map size (same as the dense
+    // GraphDataCell, which also keeps the streamed value)
     if (is_support_delete_) {
         for (uint64_t i = 0; i < size; ++i) {
             InnerIdType key;
@@ -417,7 +420,10 @@ SparseGraphDataCell::PermuteEntries(const Vector<InnerIdType>& perm,
         if (is_support_delete_) {
             this->node_version_.swap(new_node_version);
         }
-        this->total_count_.store(static_cast<InnerIdType>(this->neighbors_.size()));
+        // Permutation only remaps ids, it never changes the id space: Move() erases
+        // moved-from ids without touching total_count_, so storing neighbors_.size()
+        // here would shrink the count by the number of holes and break the
+        // GraphInterface invariant (TotalCount() vs node_version_ / serialization).
     }
 
     if (reverse_edges_) {

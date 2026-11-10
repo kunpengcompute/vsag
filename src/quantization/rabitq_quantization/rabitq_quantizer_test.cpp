@@ -855,3 +855,54 @@ TEST_CASE("RaBitQ Batch Mode Bit Width Guard", "[ut][RaBitQuantizer]") {
         }
     }
 }
+
+TEST_CASE("RaBitQ Batch Mode Enable-Batch Guard", "[ut][RaBitQuantizer]") {
+    constexpr auto dim = 64;
+    constexpr auto count = 32;
+    auto allocator = SafeAllocator::FactoryDefaultAllocator();
+    auto vecs = fixtures::generate_vectors(count + 1, dim);
+
+    // the 4-bit LUT fast path must also require rabitq_enable_batch_: with batch
+    // disabled the LUT is neither allocated nor built (query_offset_4bit_lut_
+    // stays 0), so the batch interface must fall back to the per-code path
+    RaBitQuantizer<MetricType::METRIC_TYPE_L2SQR> quantizer(
+        dim,
+        dim,
+        /*num_bits_per_dim_query=*/32,
+        /*num_bits_per_dim_base=*/1,
+        /*use_fht=*/false,
+        /*use_mrq=*/false,
+        allocator.get(),
+        RaBitQuantizerParameter::DEFAULT_RABITQ_VERSION,
+        RaBitQuantizerParameter::DEFAULT_RABITQ_ERROR_RATE,
+        RaBitQuantizerParameter::DEFAULT_RABITQ_BITS_PER_DIM_FILTER,
+        /*rabitq_enable_batch=*/false);
+    REQUIRE(quantizer.TrainImpl(vecs.data(), count + 1));
+
+    REQUIRE(quantizer.GetBatchMode() == 0);
+    REQUIRE(quantizer.Get4BitLutOffset() == 0);
+
+    const auto code_size = quantizer.GetCodeSize();
+    std::vector<uint8_t> codes(static_cast<uint64_t>(count) * code_size, 0);
+    for (uint32_t i = 0; i < count; ++i) {
+        REQUIRE(quantizer.EncodeOne(vecs.data() + i * dim, codes.data() + i * code_size));
+    }
+
+    auto computer = quantizer.FactoryComputer();
+    computer->SetQuery(vecs.data() + static_cast<uint64_t>(count) * dim);
+
+    std::vector<uint32_t> idx(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        idx[i] = i;
+    }
+    std::vector<float> batch_dists(count, 0.0F);
+    quantizer.ComputeDistsBatchTransposedImpl(
+        *computer, codes.data(), idx.data(), count, batch_dists.data());
+
+    // the batch interface must agree with the regular per-code path even when
+    // the bit widths alone would select the 4-bit LUT kernel
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto single_dist = quantizer.ComputeDist(*computer, codes.data() + i * code_size);
+        REQUIRE(std::abs(batch_dists[i] - single_dist) <= 1e-2F);
+    }
+}

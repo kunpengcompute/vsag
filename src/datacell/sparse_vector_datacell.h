@@ -91,6 +91,9 @@ public:
     Prefetch(InnerIdType id) override{};
 
     void
+    PermuteEntries(const Vector<InnerIdType>& perm) override;
+
+    void
     ExportModel(const FlattenInterfacePtr& other) const override {
         std::stringstream ss;
         IOStreamWriter writer(ss);
