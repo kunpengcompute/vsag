@@ -1,10 +1,12 @@
 # vsag介绍
 
+本文档介绍vsag，并提供学习文档与版本说明入口，适用于需要使用vsag的用户。
+
 简体中文|[English](./README_en.md)
 
 ## 最新消息
 
-- \[2026.12.30\]：vsag发布于Gitcode平台，实现RaBitQ 4bit查表、预处理阶段Computer对象池化复用、BFS图序底库重排、sq8和sq8_uniform batch4距离计算优化。
+- \[2026-12-30\]：vsag基于hgraph索引实现RaBitQ 4bit查表、预处理阶段Computer对象池化复用、BFS图序底库重排、sq8和sq8_uniform batch4距离计算优化。
 
 ## 项目介绍
 
@@ -17,9 +19,11 @@ vsag是蚂蚁开源的高性能C++向量索引库，用于近似最近邻搜索�
 ```text
 vsag/
 ├─ 0001-vsag_1.0.0-optimize-rabitq_sq8.patch      // 优化补丁
+├─ README.md                                      // 项目介绍
 └── docs
    ├── LICENSE
    └── zh
+      ├── menu_vsag.md                            // 文档目录
       ├── feature_introduction.md                 // 特性介绍
       ├── best_practices.md                       // 最佳实践
       ├── installation_guide.md                   // 安装指南
@@ -53,7 +57,7 @@ vsag采用Apache 2.0 License许可证授权，支持修改代码和再开源。�
 
 ## 贡献声明
 
-欢迎大家为社区做贡献，如果使用过程中有任何问题或建议，或者需要反馈特性需求和bug报告，可以提交[Issues](https://gitcode.com/boostkit/community/blob/master/docs/contributor/issue-submit.md)联系我们，具体贡献方法可参考[这里](https://gitcode.com/boostkit/community/blob/master/docs/contributor/contributing.md)。同时也欢迎大家在[讨论专区](https://gitcode.com/boostkit/community/discussions)展开讨论交流。感谢您的支持。
+欢迎大家为社区做贡献，如果使用过程中有任何问题或建议，或者需要反馈特性需求和bug报告，可以提交[Issues](https://gitcode.com/boostkit/community/blob/master/docs/contributor/issue-submit.md)联系我们，具体贡献方法可参考[贡献指南](https://gitcode.com/boostkit/community/blob/master/docs/contributor/contributing.md)。同时也欢迎大家在[讨论专区](https://gitcode.com/boostkit/community/discussions)展开讨论交流。感谢您的支持。
 
 ## 致谢
 

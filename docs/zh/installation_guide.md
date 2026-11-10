@@ -1,5 +1,7 @@
 # 安装指南
 
+本文档介绍vsag在已验证环境下的编译安装流程，涵盖开源代码获取、补丁应用与编译，适用于需要在鲲鹏服务器上安装vsag的用户。
+
 ## 已验证环境
 
 为保证您可以顺利安全地使用vsag，请确保所使用的环境信息在已验证环境范围内。
@@ -8,11 +10,11 @@
 
 | 操作系统 | CPU类型 | 内存 | 编译器 | 其他 |
 | --- | --- | --- | --- | --- |
-| openEuler 24.03 LTS SP3 | 鲲鹏950 7592C处理器 | 24 * 64GB | GCC 12.3.1 | CMake>=3.22.0 |
+| openEuler 24.03 LTS SP3 | 鲲鹏950 7592C处理器 | 24 * 64GB | GCC 12.3.1 | CMake 3.22.0及以上版本 |
 
 ## 编译安装
 
-先从GitHub下载vsag开源代码，然后从GitCode下载vsag补丁代码，应用补丁。
+先从GitHub下载vsag开源代码，然后下载vsag补丁代码，应用补丁。
 
 1. 获取开源代码，假设安装路径为“/path/to”。
 
@@ -21,7 +23,7 @@
     git clone -b v1.0.0 https://github.com/antgroup/vsag.git
     ```
 
-2. 下载hnswlib的Patch文件，假设安装路径为“/path/to”。
+2. 下载vsag的Patch文件，假设安装路径为“/path/to”。
 
     ```bash
     git clone -b v1.0.0 https://gitcode.com/boostkit/vsag.git vsag-patch
@@ -116,14 +118,14 @@
     │   │   ├─ scalar_quantization/                // 标量量化器
     │   │   │   ├─ scalar_quantizer.h              // SQ量化器接口
     │   │   │   ├─ scalar_quantizer.cpp            // SQ量化器实现
-    │   │   │   └─ sq8_uniform_quantizer.cpp       // SQ8Uniform量化器实现
+    │   │   │   └─ sq8_uniform_quantizer.cpp       // SQ8 Uniform量化器实现
     │   │   └─ sparse_quantization/                // 稀疏量化器
     │   ├─ simd/                                   // SIMD距离计算
     │   │   ├─ kernels/                            // 跨指令集共用kernel
     │   │   │   └─ sq8_compute.h                   // SQ8距离计算kernel
     │   │   ├─ rabitq_simd.cpp                     // RaBitQ查表距离计算
     │   │   ├─ sq8_simd.cpp                        // SQ8距离计算
-    │   │   ├─ sq8_uniform_simd.cpp                // SQ8Uniform距离计算
+    │   │   ├─ sq8_uniform_simd.cpp                // SQ8 Uniform距离计算
     │   │   ├─ amx.cpp                             // AMX实现
     │   │   ├─ avx.cpp                             // AVX实现
     │   │   ├─ avx2.cpp                            // AVX2实现
@@ -157,3 +159,19 @@
     cd /path/to/vsag
     VSAG_ENABLE_TOOLS=ON make release
     ```
+    
+    编译完成后回显如下所示。
+
+    ```output
+    [100%] Linking CXX executable eval_performance
+    [100%] Built target eval_performance
+    [100%] Linking CXX executable analyze_index
+    [100%] Built target analyze_index
+    gmake[1]: Leaving directory '/path/to/vsag/build-release'
+    ```
+
+## 修订记录
+
+| 文档版本 | 发布日期 | 修改说明 |
+| ---- | ---- | ---- |
+| 01 | 2026-12-30 | 第一次正式发布。|
