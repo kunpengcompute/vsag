@@ -1,0 +1,174 @@
+name: PR-pipeline_vsag
+
+on:
+  pull_request_target:
+    types: ["open", "reopen", "update"]
+    branches: ["**"]
+  pull_request_comment:
+    types: [created]
+    branches: [ '*' ]
+    comments: [ '^(?:\/)?compile*' ]
+  workflow_dispatch:
+
+env:
+  pr_id: ${{ atomgit.event.pull_request.number }}
+  owner_name: boostkit
+  target_branch: ${{ atomgit.event.pull_request.base.ref }}
+
+concurrency: # 并发控制
+  enable: true             # 启用并发控制
+  max: 3                   # 最大并发运行数（范围1-5）：同一工作流最多3个运行同时执行
+  exceed-action: QUEUE     # 超出并发上限的策略：QUEUE排队等待（另一选项IGNORE=直接忽略新触发）
+  preemption:              # 抢占策略：新事件到来时取消同组正在运行的旧运行
+    enable: true           # 启用抢占（默认true）
+    events: [mr_id]        # 抢占粒度=按MR隔离：同一MR的新推送取消该MR的旧运行，不同MR互不影响
+
+permissions:
+  repository: read
+  pr: read
+
+stages:
+  stage0:  #stage identifier 仅支持大小写英文字母、数字、“-”或“_”，长度介于1~128之间
+    name: 初始化阶段 # 阶段名称
+    select: selected_by_default  # always, selected_by_default，不配置的话默认为selected_by_default(任务根据其所属阶段的 select 属性或全局配置决定是否默认选中)
+    jobs:  #任务，单stage下最多100个
+      associate_pr_comment:
+        name: associate_pr_comment
+        select: selected_by_default
+        runs-on: ["ubuntu-latest", "x64", "slim"]
+        steps:
+          - name: associate-pr-comment
+            uses: associate-pr-comment
+      init_pipeline_status:
+        name: init_pipeline_status
+        select: selected_by_default
+        runs-on: [ "ubuntu-latest", "x64", "slim" ]
+        steps:
+          - name: Add running label
+            uses: openlibing/pr-label-action@v1.0.0
+            with:
+              add_labels: ci-pipeline-running # 填写流水线开始时需要添加的标签
+              remove_labels: ci-pipeline-passed,ci-pipeline-failed # 填写流水线开始时需要移除的标签
+              token: ${{secrets.PR_LABEL_TOKEN}}
+  stage1:  #stage identifier 仅支持大小写英文字母、数字、“-”或“_”，长度介于1~128之间
+    name: 校验阶段 # 阶段名称
+    select: selected_by_default  # always, selected_by_default，不配置的话默认为selected_by_default(任务根据其所属阶段的 select 属性或全局配置决定是否默认选中)
+    jobs:  #任务，单stage下最多100个
+      Detect_file_changes:
+        name: Detect_file_changes
+        runs-on: ["ubuntu-latest", "x64", "slim"]
+        outputs:
+          need_build: ${{ steps.set-skip.outputs.need_build }}
+        steps:
+          - name: checkout
+            uses: checkout
+            with:
+              allow-unsafe-pr-checkout: true
+              ref: refs/merge-requests/${{ env.pr_id }}/merge
+              fetch-depth: 0
+          - name: Only_doc_commit
+            id: filter
+            uses: paths-changes-filter
+            with:
+              event-name: 'pull_request'
+              base: ${{ atomgit.event.pull_request.base.ref }}
+              repo: ${{ atomgit.repository }}
+              number: ${{ env.pr_id }}
+              list-files: json
+              predicate-quantifier: every
+              filters: |
+                changed:
+                  - '**'
+                non-doc:
+                  - '!docs/**'
+                  - '!**/*.md'
+                  - '!**/*.rst'
+                  - '!**/*.log'
+                  - '!**/*.png'
+                  - '!**/*.jpg'
+                  - '!**/*.doc'
+                  - '!**/*.eddx'
+                  - '!**/*.svg'
+          - name: set build skip flag
+            id: set-skip
+            run: |
+              echo "changed: ${{ steps.filter.outputs.changed_files }}"
+              echo "non-doc: ${{ steps.filter.outputs.non-doc }}"
+              if [ "${{ steps.filter.outputs.non-doc }}" = "true" ]; then
+                echo "need_build=yes" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "need_build=no" >> "$ATOMGIT_OUTPUT"
+              fi
+      format:
+        name: Format Check
+        needs: Detect_file_changes
+        runs-on: [ubuntu-latest, x64, small]
+        steps:
+          - name: Checkout source code
+            uses: checkout
+          - name: Install clang-format
+            run: |
+              sudo apt-get update
+              sudo apt-get install -y clang-format-15
+              sudo ln -sf /usr/bin/clang-format-15 /usr/bin/clang-format
+              clang-format --version
+          - name: Configure GitHub proxy
+            run: git config --global url."http://git-cdn-service.git-cdn.svc.cluster.local:8000/".insteadOf "https://github.com/"
+          - name: Run clang-format check
+            run: |
+              if [ -f ./scripts/format/check_format.sh ]; then
+                ./scripts/format/check_format.sh
+              else
+                echo "scripts/format/check_format.sh not found, skip format check"
+              fi
+      sca-pr:
+        name: sca-pr
+        runs-on: [ "ubuntu-latest", "x64", "slim" ]
+        permissions:
+          id-token: write
+        steps:
+          - name: Run SCA PR scan
+            uses: openlibing/sca-action/sca-pr-action@v1.0.0
+            with:
+              project-name: "boostkit"
+      AntiPoison-scan:
+        name: AntiPoison-scan
+        runs-on: [ "ubuntu-latest", "x64", "slim" ]
+        permissions:
+          id-token: write
+        steps:
+          - name: Run malicious code scan
+            uses: openlibing/malicious-code-scan-action/malicious-code-pr-scan-action@v1.0.0
+            with:
+              project-name: "boostkit"
+      build:
+        name: build
+        needs: [ Detect_file_changes ]
+        if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
+        uses: .gitcode/workflows/pr_build.yml
+        with:
+          CP_DOCKER_IMG: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:arm_vsag_v1.0"
+          pr_id: "${{ env.pr_id }}"
+          target_branch: "${{ env.target_branch }}"
+      ut:
+        name: ut
+        needs: [ Detect_file_changes ]
+        if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
+        uses: .gitcode/workflows/pr_ut.yml
+        with:
+          CP_DOCKER_IMG: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:arm_vsag_v1.0"
+          pr_id: "${{ env.pr_id }}"
+          target_branch: "${{ env.target_branch }}"
+
+post:
+  jobs:
+    update_pipeline_status:
+      name: update_pipeline_status
+      runs-on: ["ubuntu-latest", "x64", "slim"]
+      steps:
+        - name: Set result label
+          uses: openlibing/pr-label-action@v1.0.0
+          with:
+            add_labels: ${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-passed' || 'ci-pipeline-failed' }}
+            remove_labels: ci-pipeline-running,${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-failed' || 'ci-pipeline-passed' }}
+            token: ${{secrets.PR_LABEL_TOKEN}}
