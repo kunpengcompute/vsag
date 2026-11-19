@@ -15,9 +15,9 @@
 
 ### Compatibility with the OS, Compiler, and Processor
 
-| OS | CPU | Memory | Compiler | Others |
-| -------- | ------ | ------ | ------ | ------ |
-| openEuler 24.03 LTS SP3 | Kunpeng 950 processor | 24 x 64 GB | GCC 12.3.1 | CMake>=3.22.0 |
+| OS | CPU | Memory | Compiler |
+| -------- | ------ | ------ | ------ | 
+| openEuler 24.03 LTS SP3 | Kunpeng 950 processor | 24 x 64 GB | GCC 12.3.1 CMake>=3.22.0 |
 
 ## Important Notes
 
