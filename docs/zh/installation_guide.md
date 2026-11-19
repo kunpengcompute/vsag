@@ -159,7 +159,7 @@
     cd /path/to/vsag
     VSAG_ENABLE_TOOLS=ON make release
     ```
-    
+
     编译完成后回显如下所示。
 
     ```output

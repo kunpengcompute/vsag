@@ -82,9 +82,9 @@ RaBitQ 1bit量化距离计算增加4bit查表路径，通过增大向量展开�
 
 1. RaBitQ 4bit查表的查询流程
 
-    1) RaBitQFloatBuild4BitLookupTable：对查询向量做预处理，生成一个float16格式的lookup table（每组4个16位浮点数，共dim/4组）。
+    1. RaBitQFloatBuild4BitLookupTable：对查询向量做预处理，生成一个float16格式的lookup table（每组4个16位浮点数，共dim/4组）。
 
-    2) RaBitQFloatBatchBinaryIPBy4BitLookup：对一批候选向量的4bit code做拆分取nibble（0-15），通过查表累加得到float32内积分数。
+    2. RaBitQFloatBatchBinaryIPBy4BitLookup：对一批候选向量的4bit code做拆分取nibble（0-15），通过查表累加得到float32内积分数。
 
 2. SVE路径性能优化思路
 
