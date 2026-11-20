@@ -6,7 +6,7 @@
 
 ## 最新消息
 
-- \[2026-12-30\]：vsag基于hgraph索引实现RaBitQ 4bit查表、预处理阶段Computer对象池化复用、BFS图序底库重排、sq8和sq8_uniform batch4距离计算优化。
+\[2026-12-30\]：vsag基于hgraph索引实现RaBitQ 4bit查表、预处理阶段Computer对象池化复用、BFS图序底库重排、sq8和sq8_uniform batch4距离计算优化。
 
 ## 项目介绍
 
@@ -37,13 +37,13 @@ vsag/
 
 ## 学习文档
 
-| 学习资源名称 | 学习资源简介 |
+| 学习文档名称 | 学习文档简介 |
 | ------------ | ------------ |
-| [特性介绍](./docs/zh/feature_introduction.md) | 介绍vsag的主要特性。 |
-| [最佳实践](./docs/zh/best_practices.md) | 提供vsag的测试方法。 |
-| [安装指南](./docs/zh/installation_guide.md) | 提供vsag源码编译安装方法的详细指导。 |
-| [快速入门](./docs/zh/quick_start.md) | 提供vsag的快速入门指导。 |
-| [版本说明书](./docs/zh/release_notes.md) | 提供vsag发布版本的基础信息和特性更新信息。 |
+| 《[特性介绍](./docs/zh/feature_introduction.md)》 | 介绍vsag的主要特性。 |
+| 《[最佳实践](./docs/zh/best_practices.md)》 | 提供vsag的测试方法。 |
+| 《[安装指南](./docs/zh/installation_guide.md)》 | 提供vsag源码编译安装方法的详细指导。 |
+| 《[快速入门](./docs/zh/quick_start.md)》 | 提供vsag的快速入门指导。 |
+| 《[版本说明书](./docs/zh/release_notes.md)》 | 提供vsag发布版本的基础信息和特性更新信息。 |
 
 ## 免责声明
 

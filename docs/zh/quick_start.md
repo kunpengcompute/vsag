@@ -1,10 +1,10 @@
 # 快速入门
 
-请先参照[安装指南](./installation_guide.md)完成vsag源码安装后，参考本文档示例内容验证基于鲲鹏平台优化后的vsag的核心功能。
+请先参照《[安装指南](./installation_guide.md)》完成vsag源码安装后，参考本文档示例内容验证基于鲲鹏平台优化后的vsag的核心功能。
 
 ## 背景说明
 
-本文档所述版本为基于vsag v1.0.0的鲲鹏平台优化版本，在开源代码基础上应用了鲲鹏优化补丁0001-vsag_1.0.0-optimize-rabitq_sq8.patch。补丁包含4项优化：RaBitQ 4bit查表、预处理阶段Computer对象池化复用、BFS图序底库重排、SQ8和SQ8 Uniform batch4距离计算，各优化点的原理与开启条件参见[特性介绍](./feature_introduction.md)。
+本文档所述版本为基于vsag v1.0.0的鲲鹏平台优化版本，在开源代码基础上应用了鲲鹏优化补丁0001-vsag_1.0.0-optimize-rabitq_sq8.patch。补丁包含4项优化：RaBitQ 4bit查表、预处理阶段Computer对象池化复用、BFS图序底库重排、SQ8和SQ8 Uniform batch4距离计算，各优化点的原理与开启条件参见《[特性介绍](./feature_introduction.md)》。
 
 与标准版相比，优化版本保持对外公共API不变，改动集中在库内部的搜索与距离计算路径，主要差异如下：
 

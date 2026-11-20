@@ -43,7 +43,7 @@
     ```
 
     按ESC键退出编辑模式，输入`:wq`保存并退出文件。
-    
+
     >![表示说明的图片](public_sys-resources/icon-note.gif) **说明：**
     > - 第一次运行时，需将type字段设置为"build,search"以构建并保存索引，索引路径在index_path字段中指定，保存的索引文件为hgraph_index。后续运行时，将type字段设置为"search"以直接加载构建完成的索引，进行性能测试。
     > - datapath字段指定数据集的路径，确保路径指向正确的数据集文件。
