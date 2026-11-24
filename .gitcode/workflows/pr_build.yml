@@ -17,7 +17,7 @@ jobs:
     name: Compile
     select: selected_by_default
     needs: [ ]
-    runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=large ]
+    runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=xlarge ]
     container:
       image: ${{ inputs.CP_DOCKER_IMG }}
       # options: --user root
