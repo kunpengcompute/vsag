@@ -44,6 +44,7 @@ vsag/
 | 《[安装指南](./docs/zh/installation_guide.md)》 | 提供vsag源码编译安装方法的详细指导。 |
 | 《[快速入门](./docs/zh/quick_start.md)》 | 提供vsag的快速入门指导。 |
 | 《[版本说明书](./docs/zh/release_notes.md)》 | 提供vsag发布版本的基础信息和特性更新信息。 |
+| 《[常见问题](./docs/zh/faq.md)》 | 提供vsag使用过程中遇到的常见问题及解决方法。 |
 
 ## 免责声明
 
