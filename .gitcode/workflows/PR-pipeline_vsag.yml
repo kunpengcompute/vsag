@@ -23,6 +23,10 @@ concurrency: # 并发控制
     enable: true           # 启用抢占（默认true）
     events: [mr_id]        # 抢占粒度=按MR隔离：同一MR的新推送取消该MR的旧运行，不同MR互不影响
 
+permissions:
+  repository: read
+  pr: read
+
 stages:
   stage0:  #stage identifier 仅支持大小写英文字母、数字、“-”或“_”，长度介于1~128之间
     name: 初始化阶段 # 阶段名称
